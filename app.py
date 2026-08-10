@@ -1,0 +1,402 @@
+"""
+零件耗用一覽 / 故障率查詢工具
+================================
+使用方式:
+    streamlit run app.py
+
+部署:
+    放到 GitHub（免費 repo 即可），到 https://share.streamlit.io 用該 repo 建立
+    一個 Streamlit Community Cloud 應用程式，即可得到一個瀏覽器網址給同事使用。
+
+密碼保護:
+    在 Streamlit Cloud 的 App settings -> Secrets 裡加入：
+        APP_PASSWORD = "你自訂的密碼"
+    本機測試時，可在 streamlit_app/.streamlit/secrets.toml 裡加同一行。
+
+★★★ 重要假設，請在真正上線前逐一核對 ★★★
+    這支程式是依照你提供的 PPT 畫面稿 + 兩份分類表（機型分類_已填寫.xlsx、
+    零件分類一覽表.xlsx）寫的。「零件耗用資料」「出貨資料」這兩種每月更新的
+    Excel，我還沒看過真正的檔案，欄位名稱是照 PPT 截圖裡的表格文字猜的，
+    列在下面 ASSUMED_USAGE_COLUMNS / ASSUMED_SHIPMENT_COLUMNS。
+    正式使用前，請上傳一份真實檔案讓我核對，欄位名稱如果對不上，
+    程式會在畫面上明確告訴你缺哪個欄位，不會默默算錯。
+"""
+
+import io
+import re
+from datetime import date, datetime
+
+import pandas as pd
+import streamlit as st
+
+st.set_page_config(page_title="零件耗用 / 故障率查詢", layout="wide")
+
+# ---------------------------------------------------------------------------
+# 假設的欄位名稱（依 PPT 截圖推測，上線前務必用真實檔案核對）
+# ---------------------------------------------------------------------------
+ASSUMED_USAGE_COLUMNS = {
+    "repair_no": "維修單號",       # 用來判讀維修分公司別（第5碼）
+    "model": "維修機型",           # 對應機型分類表的「機型」
+    "install_date": "裝機日",
+    "fault_date": "故障日",        # 所有邏輯以此欄位為基準
+    "fault_category": "故障類別",
+    "fault_part": "故障部位",      # 對應零件分類一覽表的「分類」
+    "part_no": "零件編號",         # 對應零件分類一覽表的「零件編號」
+    "part_name": "品名",
+    "qty": "數量",
+}
+
+# 出貨資料：機型 + 每年一欄（例如 "2021販售量", ..., "2026販售量(-0731)"）
+SHIPMENT_MODEL_COL = "機型"
+SHIPMENT_YEAR_COL_PATTERN = re.compile(r"^(20\d{2})販售量")
+
+BRANCH_CODE_MAP = {
+    "0": "台北公司", "2": "台北公司", "3": "桃園分公司", "4": "新竹分公司",
+    "5": "中部分公司", "6": "嘉義分公司", "7": "台南分公司", "8": "高雄分公司",
+    "B": "花蓮分公司", "C": "宜蘭分公司", "E": "屏東分公司", "F": "基隆分公司",
+}
+
+CAT_LOCKED_FIELDS_USAGE_TABLE_COLS = [
+    "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司",
+    "前月耗用量", "去年同期耗用量",
+]
+RATE_TABLE_COLS = [
+    "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司",
+    "該月累積故障率", "前月累積故障率", "去年同期累積故障率",
+]
+
+
+# ---------------------------------------------------------------------------
+# 密碼保護
+# ---------------------------------------------------------------------------
+def check_password() -> bool:
+    def _password_entered():
+        correct = st.secrets.get("APP_PASSWORD", None)
+        if correct is None:
+            st.session_state["password_ok"] = True  # 沒設密碼時，本機測試放行
+            return
+        st.session_state["password_ok"] = (
+            st.session_state.get("password_input", "") == correct
+        )
+
+    if st.session_state.get("password_ok"):
+        return True
+
+    st.title("零件耗用 / 故障率查詢")
+    st.text_input("請輸入密碼", type="password", key="password_input",
+                   on_change=_password_entered)
+    if st.session_state.get("password_ok") is False:
+        st.error("密碼錯誤，請再試一次")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 資料讀取與清理
+# ---------------------------------------------------------------------------
+def read_excel(uploaded_file) -> pd.DataFrame:
+    return pd.read_excel(uploaded_file)
+
+
+def validate_columns(df: pd.DataFrame, required: list, label: str) -> list:
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(
+            f"「{label}」缺少欄位：{missing}。目前偵測到的欄位是：{list(df.columns)}。"
+            f"請確認檔案格式，或告訴我正確欄位名稱讓我調整程式。"
+        )
+    return missing
+
+
+def branch_from_repair_no(repair_no: str) -> str:
+    if not isinstance(repair_no, str) or len(repair_no) < 5:
+        return "未知"
+    code = repair_no[4]  # 第5碼，index 4
+    return BRANCH_CODE_MAP.get(code.upper(), "未知")
+
+
+def extract_year_month(d) -> str:
+    """回傳 'YYYY-MM'；輸入可能已經是 datetime，也可能是文字。"""
+    if pd.isna(d):
+        return None
+    if isinstance(d, (pd.Timestamp, datetime, date)):
+        return f"{d.year:04d}-{d.month:02d}"
+    s = str(d)
+    m = re.match(r"(\d{4})[-/](\d{1,2})", s)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def build_usage_df(usage_this_year_bytes, usage_since_2021_bytes,
+                    model_map_bytes, part_map_bytes):
+    df_a = pd.read_excel(io.BytesIO(usage_this_year_bytes))
+    df_b = pd.read_excel(io.BytesIO(usage_since_2021_bytes))
+    model_map = pd.read_excel(io.BytesIO(model_map_bytes))
+    part_map = pd.read_excel(io.BytesIO(part_map_bytes))
+
+    cols = ASSUMED_USAGE_COLUMNS
+    for df, label in [(df_a, "當年度零件耗用資料"), (df_b, "2021~上月零件耗用資料")]:
+        validate_columns(df, list(cols.values()), label)
+    validate_columns(model_map, ["類別", "機型", "內外機"], "機型分類表")
+    validate_columns(part_map, ["分類", "零件編號", "品名"], "零件分類一覽表")
+
+    usage = pd.concat([df_b, df_a], ignore_index=True)
+    # 同一張維修單同一個零件編號視為同一筆，避免兩份資料重疊月份重複計算
+    dedup_keys = [k for k in [cols["repair_no"], cols["part_no"]] if k in usage.columns]
+    if dedup_keys:
+        usage = usage.drop_duplicates(subset=dedup_keys, keep="last")
+
+    usage["年月"] = usage[cols["fault_date"]].apply(extract_year_month)
+    usage["維修分公司"] = usage[cols["repair_no"]].apply(branch_from_repair_no)
+
+    # 關聯機型分類表 -> 類別 / 內外機
+    model_lookup = model_map.set_index("機型")[["類別", "內外機"]]
+    usage = usage.join(model_lookup, on=cols["model"])
+    usage = usage.rename(columns={cols["model"]: "機型"})
+
+    # 關聯零件分類一覽表 -> 故障部位(分類)
+    part_lookup = part_map.set_index("零件編號")["分類"]
+    usage["故障部位"] = usage[cols["part_no"]].map(part_lookup)
+    usage = usage.rename(columns={cols["part_no"]: "零件料號"})
+
+    # 新零件料號提醒：耗用資料裡有、但零件分類一覽表沒有的零件編號
+    known_parts = set(part_map["零件編號"].astype(str))
+    used_parts = set(usage["零件料號"].dropna().astype(str))
+    unknown_parts = sorted(used_parts - known_parts)
+
+    return usage, unknown_parts, model_map, part_map
+
+
+@st.cache_data(show_spinner=False)
+def build_shipment_df(shipment_bytes):
+    df = pd.read_excel(io.BytesIO(shipment_bytes))
+    validate_columns(df, [SHIPMENT_MODEL_COL], "出貨資料")
+    year_cols = [c for c in df.columns if SHIPMENT_YEAR_COL_PATTERN.match(str(c))]
+    if not year_cols:
+        st.warning("在出貨資料裡找不到「20XX販售量」這種格式的欄位，累積出貨量會算不出來，"
+                   "請確認出貨資料的欄位名稱。")
+    return df, year_cols
+
+
+# ---------------------------------------------------------------------------
+# 業務邏輯：零件耗用一覽
+# ---------------------------------------------------------------------------
+def shift_month(ym: str, months: int) -> str:
+    y, m = map(int, ym.split("-"))
+    idx = y * 12 + (m - 1) + months
+    return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
+
+
+def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_partno, f_branch):
+    scope = usage_df[(usage_df["年月"] >= start_ym) & (usage_df["年月"] <= end_ym)]
+    if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
+    if f_io != "全部": scope = scope[scope["內外機"] == f_io]
+    if f_model != "全部": scope = scope[scope["機型"] == f_model]
+    if f_part != "全部": scope = scope[scope["故障部位"] == f_part]
+    if f_partno != "全部": scope = scope[scope["零件料號"] == f_partno]
+    if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
+
+    group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
+    combos = scope[group_cols].drop_duplicates()
+
+    prev_month = shift_month(end_ym, -1)
+    last_year = shift_month(end_ym, -12)
+
+    def qty_in_month(row, ym):
+        m = (
+            (usage_df["年月"] == ym)
+            & (usage_df["類別"] == row["類別"])
+            & (usage_df["內外機"] == row["內外機"])
+            & (usage_df["機型"] == row["機型"])
+            & (usage_df["故障部位"] == row["故障部位"])
+            & (usage_df["零件料號"] == row["零件料號"])
+            & (usage_df["維修分公司"] == row["維修分公司"])
+        )
+        return usage_df.loc[m, ASSUMED_USAGE_COLUMNS["qty"]].sum()
+
+    combos["前月耗用量"] = combos.apply(lambda r: qty_in_month(r, prev_month), axis=1)
+    combos["去年同期耗用量"] = combos.apply(lambda r: qty_in_month(r, last_year), axis=1)
+    combos = combos.rename(columns={"內外機": "室內/外機"})
+    return combos[CAT_LOCKED_FIELDS_USAGE_TABLE_COLS]
+
+
+# ---------------------------------------------------------------------------
+# 業務邏輯：故障率
+# ---------------------------------------------------------------------------
+def cumulative_shipment(shipment_df, year_cols, model, end_ym):
+    """2021/01/01 ~ end_ym 月底 的累積出貨量（受限於出貨資料是年度粒度）"""
+    end_year = int(end_ym.split("-")[0])
+    row = shipment_df[shipment_df[SHIPMENT_MODEL_COL] == model]
+    if row.empty:
+        return 0
+    total = 0
+    for c in year_cols:
+        y = int(SHIPMENT_YEAR_COL_PATTERN.match(c).group(1))
+        if y <= end_year:
+            total += row[c].sum()
+    return total
+
+
+def cumulative_usage_qty(usage_df, end_ym, f_cat, f_io, f_model, f_part, f_partno, f_branch):
+    scope = usage_df[usage_df["年月"] <= end_ym]
+    if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
+    if f_io != "全部": scope = scope[scope["內外機"] == f_io]
+    if f_model != "全部": scope = scope[scope["機型"] == f_model]
+    if f_part != "全部": scope = scope[scope["故障部位"] == f_part]
+    if f_partno != "全部": scope = scope[scope["零件料號"] == f_partno]
+    if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
+    return scope[ASSUMED_USAGE_COLUMNS["qty"]].sum()
+
+
+def rate_table(usage_df, shipment_df, year_cols, end_ym,
+                f_cat, f_io, f_model, f_part, f_partno, f_branch):
+    scope = usage_df[usage_df["年月"] <= end_ym]
+    if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
+    if f_io != "全部": scope = scope[scope["內外機"] == f_io]
+    if f_model != "全部": scope = scope[scope["機型"] == f_model]
+    if f_part != "全部": scope = scope[scope["故障部位"] == f_part]
+    if f_partno != "全部": scope = scope[scope["零件料號"] == f_partno]
+    if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
+
+    group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
+    combos = scope[group_cols].drop_duplicates()
+
+    prev_ym = shift_month(end_ym, -1)
+    last_year_ym = shift_month(end_ym, -12)
+
+    def rate_for(row, ym):
+        qty = cumulative_usage_qty(
+            usage_df, ym, row["類別"], row["內外機"], row["機型"],
+            row["故障部位"], row["零件料號"], row["維修分公司"],
+        )
+        ship = cumulative_shipment(shipment_df, year_cols, row["機型"], ym)
+        if not ship:
+            return None
+        return qty / ship
+
+    combos["該月累積故障率"] = combos.apply(lambda r: rate_for(r, end_ym), axis=1)
+    combos["前月累積故障率"] = combos.apply(lambda r: rate_for(r, prev_ym), axis=1)
+    combos["去年同期累積故障率"] = combos.apply(lambda r: rate_for(r, last_year_ym), axis=1)
+    combos = combos.rename(columns={"內外機": "室內/外機"})
+
+    for c in ["該月累積故障率", "前月累積故障率", "去年同期累積故障率"]:
+        combos[c] = combos[c].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "-")
+    return combos[RATE_TABLE_COLS]
+
+
+# ---------------------------------------------------------------------------
+# 畫面
+# ---------------------------------------------------------------------------
+def cascading_select(label, options, key, disabled=False):
+    opts = ["全部"] + [o for o in options if o != "全部"]
+    return st.selectbox(label, opts, key=key, disabled=disabled)
+
+
+def main():
+    if not check_password():
+        return
+
+    st.title("零件耗用 / 故障率查詢")
+
+    with st.expander("📤 上傳資料（每次都請上傳最新檔案）", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            f_usage_year = st.file_uploader("① 當年度零件耗用資料", type="xlsx")
+            f_usage_2021 = st.file_uploader("② 2021~上月零件耗用資料", type="xlsx")
+            f_shipment = st.file_uploader("③ 2021~至今出貨資料", type="xlsx")
+        with c2:
+            f_model_map = st.file_uploader("④ 機型分類表（機型分類_已填寫）", type="xlsx")
+            f_part_map = st.file_uploader("⑤ 零件分類一覽表", type="xlsx")
+
+    if not all([f_usage_year, f_usage_2021, f_shipment, f_model_map, f_part_map]):
+        st.info("請上傳以上 5 份檔案後才能開始查詢。")
+        return
+
+    usage_df, unknown_parts, model_map, part_map = build_usage_df(
+        f_usage_year.getvalue(), f_usage_2021.getvalue(),
+        f_model_map.getvalue(), f_part_map.getvalue(),
+    )
+    shipment_df, year_cols = build_shipment_df(f_shipment.getvalue())
+
+    if unknown_parts:
+        st.warning(
+            f"⚠️ 有 {len(unknown_parts)} 個零件料號沒有登錄在「零件分類一覽表」裡，"
+            f"請確認是否為新零件：{', '.join(unknown_parts[:30])}"
+            + ("...（僅顯示前30個）" if len(unknown_parts) > 30 else "")
+        )
+
+    all_cats = sorted(model_map["類別"].dropna().unique().tolist())
+    all_ios = sorted(model_map["內外機"].dropna().unique().tolist())
+    all_parts = sorted(part_map["分類"].dropna().unique().tolist())
+    all_branches = sorted(BRANCH_CODE_MAP.values())
+
+    tab_usage, tab_rate = st.tabs(["零件耗用一覽", "故障率"])
+
+    # ---------------- 零件耗用一覽 ----------------
+    with tab_usage:
+        st.subheader("查詢條件")
+        r1 = st.columns(4)
+        start_ym = r1[0].text_input("查找年月（起始，YYYY-MM）", value="2021-01", key="u_start")
+        end_ym = r1[1].text_input("查找年月（結束，YYYY-MM）", value="2026-07", key="u_end")
+        f_cat = r1[2].selectbox("類別", ["全部"] + all_cats, key="u_cat")
+        avail_models = sorted(model_map[model_map["類別"] == f_cat]["機型"].unique().tolist()) \
+            if f_cat != "全部" else sorted(model_map["機型"].unique().tolist())
+        f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
+
+        r2 = st.columns(4)
+        f_model = r2[0].selectbox("機型", ["全部"] + avail_models, key="u_model")
+        f_part = r2[1].selectbox("故障部位", ["全部"] + all_parts, key="u_part")
+        avail_partno = sorted(part_map[part_map["分類"] == f_part]["零件編號"].astype(str).unique().tolist()) \
+            if f_part != "全部" else []
+        f_partno = r2[2].selectbox("零件料號", ["全部"] + avail_partno, key="u_partno",
+                                    disabled=(f_part == "全部"))
+        f_branch = r2[3].selectbox("維修分公司別", ["全部"] + all_branches, key="u_branch")
+
+        result = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
+                              f_part, f_partno, f_branch)
+        st.subheader(f"查詢結果（{len(result)} 筆）")
+        st.dataframe(result, use_container_width=True)
+
+    # ---------------- 故障率 ----------------
+    with tab_rate:
+        st.subheader("查詢條件")
+        r1 = st.columns(4)
+        end_ym_r = r1[0].text_input("查找年月（YYYY-MM，代表 2021/01 ~ 該月）",
+                                     value="2026-07", key="r_month")
+        f_cat_r = r1[1].selectbox("類別", ["全部"] + all_cats, key="r_cat")
+        avail_models_r = sorted(model_map[model_map["類別"] == f_cat_r]["機型"].unique().tolist()) \
+            if f_cat_r != "全部" else sorted(model_map["機型"].unique().tolist())
+        f_io_r = r1[2].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
+        f_model_r = r1[3].selectbox("機型", ["全部"] + avail_models_r, key="r_model")
+
+        r2 = st.columns(3)
+        f_part_r = r2[0].selectbox("故障部位", ["全部"] + all_parts, key="r_part")
+        f_branch_r = r2[1].selectbox("維修分公司別", ["全部"] + all_branches, key="r_branch")
+
+        all_prev_selected = all([
+            f_cat_r, f_io_r, f_model_r, f_part_r, f_branch_r,
+        ]) and f_model_r != "" 
+        avail_partno_r = sorted(part_map[part_map["分類"] == f_part_r]["零件編號"].astype(str).unique().tolist()) \
+            if f_part_r != "全部" else []
+        partno_locked = not (f_cat_r and f_io_r and f_model_r and f_part_r and f_branch_r) or f_part_r == "全部"
+        f_partno_r = r2[2].selectbox(
+            "零件料號（需前面條件都已選擇）", ["全部"] + avail_partno_r,
+            key="r_partno", disabled=partno_locked,
+        )
+        if partno_locked:
+            st.caption("🔒 零件料號需要前面所有條件都選了才能開放；留空 = 該機型所有零件加總")
+
+        result_r = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
+                               f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
+        st.subheader(f"查詢結果（{len(result_r)} 筆）")
+        st.dataframe(result_r, use_container_width=True)
+        st.caption(
+            "⚠️ 累積出貨量目前只能抓到「年度」粒度（出貨資料是每年一欄），"
+            "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
+            "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
+        )
+
+
+if __name__ == "__main__":
+    main()
