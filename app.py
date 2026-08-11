@@ -13,13 +13,22 @@
         APP_PASSWORD = "你自訂的密碼"
     本機測試時，可在 streamlit_app/.streamlit/secrets.toml 裡加同一行。
 
-★★★ 重要假設，請在真正上線前逐一核對 ★★★
-    這支程式是依照你提供的 PPT 畫面稿 + 兩份分類表（機型分類_已填寫.xlsx、
-    零件分類一覽表.xlsx）寫的。「零件耗用資料」「出貨資料」這兩種每月更新的
-    Excel，我還沒看過真正的檔案，欄位名稱是照 PPT 截圖裡的表格文字猜的，
-    列在下面 ASSUMED_USAGE_COLUMNS / ASSUMED_SHIPMENT_COLUMNS。
-    正式使用前，請上傳一份真實檔案讓我核對，欄位名稱如果對不上，
-    程式會在畫面上明確告訴你缺哪個欄位，不會默默算錯。
+★★★ 2026/08 更新（第二輪）：已用真實檔案核對過欄位與邏輯，重要變更如下：
+
+    1. 「故障部位」：耗用資料裡雖然有現成的「故障部位」欄位（例如
+       "C02 控制PCB"），但依照使用者指示，**忽略這個原始欄位**，改為用
+       「零件編號」對照「零件分類一覽表」的「分類」欄位（壓縮機/機板/
+       風扇馬達…31種）來決定故障部位。找不到對應分類的零件編號，會標
+       為「未分類（新零件）」，並在「新零件料號提醒」裡一併列出。
+    2. 耗用資料裡有些列「零件編號」是空的、「數量」是 0（像是同一張
+       維修單底下的參考列），這些不算真的耗用，程式會先濾掉。
+    3. 「維修單號+零件編號」去重複的邏輯是錯的——同一張維修單本來就
+       可能合法地用到同一個零件兩次，已拿掉，改成單純合併兩個檔案
+       （因為兩份月資料的故障日期本來就不重疊）。
+    4. 出貨資料的 Excel 有多個工作表，且正確工作表的「分頁名稱」每月
+       會變動（例如 9 月會變成 20210101-20260831 這種格式），所以不能
+       用固定分頁名稱抓取。程式改成自動偵測「有機型欄 + 販售量欄」的
+       那個分頁，不受名稱變動影響。
 """
 
 import io
@@ -40,8 +49,8 @@ ASSUMED_USAGE_COLUMNS = {
     "install_date": "裝機日",
     "fault_date": "故障日",        # 所有邏輯以此欄位為基準
     "fault_category": "故障類別",
-    "fault_part": "故障部位",      # 對應零件分類一覽表的「分類」
-    "part_no": "零件編號",         # 對應零件分類一覽表的「零件編號」
+    "fault_part_raw": "故障部位",  # 耗用資料自帶欄位，依指示不使用，只保留供除錯參考
+    "part_no": "零件編號",         # 對應零件分類一覽表的「零件編號」，用來決定故障部位＋新零件提醒
     "part_name": "品名",
     "qty": "數量",
 }
@@ -128,24 +137,32 @@ def extract_year_month(d) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def build_usage_df(usage_this_year_bytes, usage_since_2021_bytes,
+def build_usage_df(usage_recent_bytes, usage_history_bytes,
                     model_map_bytes, part_map_bytes):
-    df_a = pd.read_excel(io.BytesIO(usage_this_year_bytes))
-    df_b = pd.read_excel(io.BytesIO(usage_since_2021_bytes))
+    """usage_recent / usage_history：兩份零件耗用資料，故障日範圍不重疊，
+    直接合併即可，不需要去重（同一張維修單合法地用到同一個零件兩次的情況
+    是存在的，用維修單號+零件編號去重會誤刪真實資料）。"""
+    df_a = pd.read_excel(io.BytesIO(usage_recent_bytes))
+    df_b = pd.read_excel(io.BytesIO(usage_history_bytes))
     model_map = pd.read_excel(io.BytesIO(model_map_bytes))
     part_map = pd.read_excel(io.BytesIO(part_map_bytes))
 
     cols = ASSUMED_USAGE_COLUMNS
-    for df, label in [(df_a, "當年度零件耗用資料"), (df_b, "2021~上月零件耗用資料")]:
+    for df, label in [(df_a, "零件耗用資料（近期）"), (df_b, "零件耗用資料（歷史）")]:
         validate_columns(df, list(cols.values()), label)
     validate_columns(model_map, ["類別", "機型", "內外機"], "機型分類表")
     validate_columns(part_map, ["分類", "零件編號", "品名"], "零件分類一覽表")
 
     usage = pd.concat([df_b, df_a], ignore_index=True)
-    # 同一張維修單同一個零件編號視為同一筆，避免兩份資料重疊月份重複計算
-    dedup_keys = [k for k in [cols["repair_no"], cols["part_no"]] if k in usage.columns]
-    if dedup_keys:
-        usage = usage.drop_duplicates(subset=dedup_keys, keep="last")
+
+    # 新零件料號提醒：耗用資料裡有、但零件分類一覽表沒有的零件編號
+    # （在濾掉空白零件編號之前先算，這樣提醒名單才完整）
+    known_parts = set(part_map["零件編號"].astype(str))
+    used_parts_all = set(usage[cols["part_no"]].dropna().astype(str))
+    unknown_parts = sorted(used_parts_all - known_parts)
+
+    # 排除零件編號空白、數量為0的列（不是真的耗用，是同一張維修單的參考列）
+    usage = usage[usage[cols["part_no"]].notna() & (usage[cols["qty"]] > 0)].copy()
 
     usage["年月"] = usage[cols["fault_date"]].apply(extract_year_month)
     usage["維修分公司"] = usage[cols["repair_no"]].apply(branch_from_repair_no)
@@ -155,22 +172,32 @@ def build_usage_df(usage_this_year_bytes, usage_since_2021_bytes,
     usage = usage.join(model_lookup, on=cols["model"])
     usage = usage.rename(columns={cols["model"]: "機型"})
 
-    # 關聯零件分類一覽表 -> 故障部位(分類)
+    # 故障部位：依指示，用零件編號對照「零件分類一覽表」的「分類」欄位決定，
+    # 不使用耗用資料自帶的「故障部位」欄位。對照不到的零件編號（新零件）
+    # 標成「未分類（新零件）」，讓使用者在畫面上也看得到，而不是悄悄消失。
     part_lookup = part_map.set_index("零件編號")["分類"]
-    usage["故障部位"] = usage[cols["part_no"]].map(part_lookup)
+    usage["故障部位"] = usage[cols["part_no"]].astype(str).map(part_lookup)
+    usage["故障部位"] = usage["故障部位"].fillna("未分類（新零件）")
     usage = usage.rename(columns={cols["part_no"]: "零件料號"})
-
-    # 新零件料號提醒：耗用資料裡有、但零件分類一覽表沒有的零件編號
-    known_parts = set(part_map["零件編號"].astype(str))
-    used_parts = set(usage["零件料號"].dropna().astype(str))
-    unknown_parts = sorted(used_parts - known_parts)
+    usage["零件料號"] = usage["零件料號"].astype(str)
 
     return usage, unknown_parts, model_map, part_map
 
 
 @st.cache_data(show_spinner=False)
 def build_shipment_df(shipment_bytes):
-    df = pd.read_excel(io.BytesIO(shipment_bytes))
+    xl = pd.ExcelFile(io.BytesIO(shipment_bytes))
+    chosen = None
+    for name in xl.sheet_names:
+        tmp = xl.parse(name, nrows=3)
+        if SHIPMENT_MODEL_COL in tmp.columns and any(
+            SHIPMENT_YEAR_COL_PATTERN.match(str(c)) for c in tmp.columns
+        ):
+            chosen = name
+            break
+    if chosen is None:
+        chosen = xl.sheet_names[0]
+    df = xl.parse(chosen)
     validate_columns(df, [SHIPMENT_MODEL_COL], "出貨資料")
     year_cols = [c for c in df.columns if SHIPMENT_YEAR_COL_PATTERN.match(str(c))]
     if not year_cols:
@@ -302,8 +329,8 @@ def main():
     with st.expander("📤 上傳資料（每次都請上傳最新檔案）", expanded=True):
         c1, c2 = st.columns(2)
         with c1:
-            f_usage_year = st.file_uploader("① 當年度零件耗用資料", type="xlsx")
-            f_usage_2021 = st.file_uploader("② 2021~上月零件耗用資料", type="xlsx")
+            f_usage_year = st.file_uploader("① 最新一期零件耗用資料（例如當月）", type="xlsx")
+            f_usage_2021 = st.file_uploader("② 歷史零件耗用資料（2021~上一期為止）", type="xlsx")
             f_shipment = st.file_uploader("③ 2021~至今出貨資料", type="xlsx")
         with c2:
             f_model_map = st.file_uploader("④ 機型分類表（機型分類_已填寫）", type="xlsx")
@@ -374,12 +401,9 @@ def main():
         f_part_r = r2[0].selectbox("故障部位", ["全部"] + all_parts, key="r_part")
         f_branch_r = r2[1].selectbox("維修分公司別", ["全部"] + all_branches, key="r_branch")
 
-        all_prev_selected = all([
-            f_cat_r, f_io_r, f_model_r, f_part_r, f_branch_r,
-        ]) and f_model_r != "" 
-        avail_partno_r = sorted(part_map[part_map["分類"] == f_part_r]["零件編號"].astype(str).unique().tolist()) \
-            if f_part_r != "全部" else []
         partno_locked = not (f_cat_r and f_io_r and f_model_r and f_part_r and f_branch_r) or f_part_r == "全部"
+        avail_partno_r = sorted(part_map[part_map["分類"] == f_part_r]["零件編號"].astype(str).unique().tolist()) \
+            if (not partno_locked and f_part_r != "全部") else []
         f_partno_r = r2[2].selectbox(
             "零件料號（需前面條件都已選擇）", ["全部"] + avail_partno_r,
             key="r_partno", disabled=partno_locked,
