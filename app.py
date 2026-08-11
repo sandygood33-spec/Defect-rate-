@@ -65,9 +65,8 @@ BRANCH_CODE_MAP = {
     "B": "花蓮分公司", "C": "宜蘭分公司", "E": "屏東分公司", "F": "基隆分公司",
 }
 
-CAT_LOCKED_FIELDS_USAGE_TABLE_COLS = [
-    "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司",
-    "前月耗用量", "去年同期耗用量",
+USAGE_TABLE_COLS = [
+    "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司", "當期耗用量",
 ]
 RATE_TABLE_COLS = [
     "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司",
@@ -216,6 +215,9 @@ def shift_month(ym: str, months: int) -> str:
 
 
 def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_partno, f_branch):
+    """查找年月(起始~結束) 整段期間內的耗用量加總。
+    2026/08 更新：不再算「前月/去年同期」單月數字，改成直接加總使用者選的
+    查找區間本身（例如選 2021-01~2026-07，就是這段期間的總耗用量）。"""
     scope = usage_df[(usage_df["年月"] >= start_ym) & (usage_df["年月"] <= end_ym)]
     if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
@@ -225,27 +227,12 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_part
     if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
 
     group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
-    combos = scope[group_cols].drop_duplicates()
-
-    prev_month = shift_month(end_ym, -1)
-    last_year = shift_month(end_ym, -12)
-
-    def qty_in_month(row, ym):
-        m = (
-            (usage_df["年月"] == ym)
-            & (usage_df["類別"] == row["類別"])
-            & (usage_df["內外機"] == row["內外機"])
-            & (usage_df["機型"] == row["機型"])
-            & (usage_df["故障部位"] == row["故障部位"])
-            & (usage_df["零件料號"] == row["零件料號"])
-            & (usage_df["維修分公司"] == row["維修分公司"])
-        )
-        return usage_df.loc[m, ASSUMED_USAGE_COLUMNS["qty"]].sum()
-
-    combos["前月耗用量"] = combos.apply(lambda r: qty_in_month(r, prev_month), axis=1)
-    combos["去年同期耗用量"] = combos.apply(lambda r: qty_in_month(r, last_year), axis=1)
-    combos = combos.rename(columns={"內外機": "室內/外機"})
-    return combos[CAT_LOCKED_FIELDS_USAGE_TABLE_COLS]
+    result = (
+        scope.groupby(group_cols, as_index=False)[ASSUMED_USAGE_COLUMNS["qty"]]
+        .sum()
+        .rename(columns={"內外機": "室內/外機", ASSUMED_USAGE_COLUMNS["qty"]: "當期耗用量"})
+    )
+    return result[USAGE_TABLE_COLS]
 
 
 # ---------------------------------------------------------------------------
@@ -265,46 +252,61 @@ def cumulative_shipment(shipment_df, year_cols, model, end_ym):
     return total
 
 
-def cumulative_usage_qty(usage_df, end_ym, f_cat, f_io, f_model, f_part, f_partno, f_branch):
-    scope = usage_df[usage_df["年月"] <= end_ym]
+def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
+    scope = usage_df
     if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
     if f_model != "全部": scope = scope[scope["機型"] == f_model]
     if f_part != "全部": scope = scope[scope["故障部位"] == f_part]
     if f_partno != "全部": scope = scope[scope["零件料號"] == f_partno]
     if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
-    return scope[ASSUMED_USAGE_COLUMNS["qty"]].sum()
+    return scope
 
 
 def rate_table(usage_df, shipment_df, year_cols, end_ym,
                 f_cat, f_io, f_model, f_part, f_partno, f_branch):
-    scope = usage_df[usage_df["年月"] <= end_ym]
-    if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
-    if f_io != "全部": scope = scope[scope["內外機"] == f_io]
-    if f_model != "全部": scope = scope[scope["機型"] == f_model]
-    if f_part != "全部": scope = scope[scope["故障部位"] == f_part]
-    if f_partno != "全部": scope = scope[scope["零件料號"] == f_partno]
-    if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
-
+    """2026/08 效能重寫：原本用 apply() 對每個組合逐一重新掃描整個 usage_df 三次
+    （該月/前月/去年同期各一次），資料量一大會非常慢。改成：先把使用者選的
+    條件套用一次（scope），再用 groupby 一次算出每個組合在三個月份的累積量，
+    整體只需要掃描 scope 三次，不是「組合數 × 3」次。"""
+    scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch)
     group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
     combos = scope[group_cols].drop_duplicates()
+
+    empty_cols = RATE_TABLE_COLS
+    if combos.empty:
+        return pd.DataFrame(columns=empty_cols)
 
     prev_ym = shift_month(end_ym, -1)
     last_year_ym = shift_month(end_ym, -12)
 
-    def rate_for(row, ym):
-        qty = cumulative_usage_qty(
-            usage_df, ym, row["類別"], row["內外機"], row["機型"],
-            row["故障部位"], row["零件料號"], row["維修分公司"],
-        )
-        ship = cumulative_shipment(shipment_df, year_cols, row["機型"], ym)
-        if not ship:
-            return None
-        return qty / ship
+    def cumulative_by_combo(target_ym):
+        sub = scope[scope["年月"] <= target_ym]
+        if sub.empty:
+            return pd.Series(dtype=float)
+        return sub.groupby(group_cols)[ASSUMED_USAGE_COLUMNS["qty"]].sum()
 
-    combos["該月累積故障率"] = combos.apply(lambda r: rate_for(r, end_ym), axis=1)
-    combos["前月累積故障率"] = combos.apply(lambda r: rate_for(r, prev_ym), axis=1)
-    combos["去年同期累積故障率"] = combos.apply(lambda r: rate_for(r, last_year_ym), axis=1)
+    cum_end = cumulative_by_combo(end_ym)
+    cum_prev = cumulative_by_combo(prev_ym)
+    cum_lastyear = cumulative_by_combo(last_year_ym)
+
+    combos = combos.set_index(group_cols)
+    combos["_end_qty"] = cum_end.reindex(combos.index).fillna(0)
+    combos["_prev_qty"] = cum_prev.reindex(combos.index).fillna(0)
+    combos["_lastyear_qty"] = cum_lastyear.reindex(combos.index).fillna(0)
+    combos = combos.reset_index()
+
+    unique_models = combos["機型"].unique().tolist()
+    ship_end = {m: cumulative_shipment(shipment_df, year_cols, m, end_ym) for m in unique_models}
+    ship_prev = {m: cumulative_shipment(shipment_df, year_cols, m, prev_ym) for m in unique_models}
+    ship_lastyear = {m: cumulative_shipment(shipment_df, year_cols, m, last_year_ym) for m in unique_models}
+
+    def safe_rate(qty, ship):
+        return (qty / ship) if ship else None
+
+    combos["該月累積故障率"] = combos.apply(lambda r: safe_rate(r["_end_qty"], ship_end[r["機型"]]), axis=1)
+    combos["前月累積故障率"] = combos.apply(lambda r: safe_rate(r["_prev_qty"], ship_prev[r["機型"]]), axis=1)
+    combos["去年同期累積故障率"] = combos.apply(lambda r: safe_rate(r["_lastyear_qty"], ship_lastyear[r["機型"]]), axis=1)
     combos = combos.rename(columns={"內外機": "室內/外機"})
 
     for c in ["該月累積故障率", "前月累積故障率", "去年同期累積故障率"]:
@@ -318,6 +320,18 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
 def cascading_select(label, options, key, disabled=False):
     opts = ["全部"] + [o for o in options if o != "全部"]
     return st.selectbox(label, opts, key=key, disabled=disabled)
+
+
+def safe_selectbox(label, options, key, disabled=False, **kwargs):
+    """2026/08 修 bug：上游條件（類別/內外機）改變時，下游選單（機型/零件料號）
+    的選項列表也會跟著變，但 Streamlit 的 selectbox 若沿用同一個 key，殘留的
+    舊選擇值可能不在新的選項列表裡（例如原本選「室內機」+「RHF25RVLT」，
+    後來把室內外機改成別的，機型卻沒跟著清空），造成篩選條件互相矛盾、
+    查不到任何資料。這裡在畫出選單前先檢查目前的殘留值還在不在新選項裡，
+    不在的話強制重置成「全部」，避免出現不可能存在的組合。"""
+    if key in st.session_state and st.session_state[key] not in options:
+        st.session_state[key] = "全部" if "全部" in options else (options[0] if options else "")
+    return st.selectbox(label, options, key=key, disabled=disabled, **kwargs)
 
 
 def main():
@@ -367,17 +381,20 @@ def main():
         start_ym = r1[0].text_input("查找年月（起始，YYYY-MM）", value="2021-01", key="u_start")
         end_ym = r1[1].text_input("查找年月（結束，YYYY-MM）", value="2026-07", key="u_end")
         f_cat = r1[2].selectbox("類別", ["全部"] + all_cats, key="u_cat")
-        avail_models = sorted(model_map[model_map["類別"] == f_cat]["機型"].unique().tolist()) \
-            if f_cat != "全部" else sorted(model_map["機型"].unique().tolist())
         f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
 
+        model_scope = model_map
+        if f_cat != "全部": model_scope = model_scope[model_scope["類別"] == f_cat]
+        if f_io != "全部": model_scope = model_scope[model_scope["內外機"] == f_io]
+        avail_models = sorted(model_scope["機型"].unique().tolist())
+
         r2 = st.columns(4)
-        f_model = r2[0].selectbox("機型", ["全部"] + avail_models, key="u_model")
+        f_model = safe_selectbox("機型", ["全部"] + avail_models, key="u_model")
         f_part = r2[1].selectbox("故障部位", ["全部"] + all_parts, key="u_part")
         avail_partno = sorted(part_map[part_map["分類"] == f_part]["零件編號"].astype(str).unique().tolist()) \
             if f_part != "全部" else []
-        f_partno = r2[2].selectbox("零件料號", ["全部"] + avail_partno, key="u_partno",
-                                    disabled=(f_part == "全部"))
+        f_partno = safe_selectbox("零件料號", ["全部"] + avail_partno, key="u_partno",
+                                   disabled=(f_part == "全部"))
         f_branch = r2[3].selectbox("維修分公司別", ["全部"] + all_branches, key="u_branch")
 
         result = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
@@ -392,10 +409,13 @@ def main():
         end_ym_r = r1[0].text_input("查找年月（YYYY-MM，代表 2021/01 ~ 該月）",
                                      value="2026-07", key="r_month")
         f_cat_r = r1[1].selectbox("類別", ["全部"] + all_cats, key="r_cat")
-        avail_models_r = sorted(model_map[model_map["類別"] == f_cat_r]["機型"].unique().tolist()) \
-            if f_cat_r != "全部" else sorted(model_map["機型"].unique().tolist())
         f_io_r = r1[2].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
-        f_model_r = r1[3].selectbox("機型", ["全部"] + avail_models_r, key="r_model")
+
+        model_scope_r = model_map
+        if f_cat_r != "全部": model_scope_r = model_scope_r[model_scope_r["類別"] == f_cat_r]
+        if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
+        avail_models_r = sorted(model_scope_r["機型"].unique().tolist())
+        f_model_r = safe_selectbox("機型", ["全部"] + avail_models_r, key="r_model")
 
         r2 = st.columns(3)
         f_part_r = r2[0].selectbox("故障部位", ["全部"] + all_parts, key="r_part")
@@ -404,7 +424,7 @@ def main():
         partno_locked = not (f_cat_r and f_io_r and f_model_r and f_part_r and f_branch_r) or f_part_r == "全部"
         avail_partno_r = sorted(part_map[part_map["分類"] == f_part_r]["零件編號"].astype(str).unique().tolist()) \
             if (not partno_locked and f_part_r != "全部") else []
-        f_partno_r = r2[2].selectbox(
+        f_partno_r = safe_selectbox(
             "零件料號（需前面條件都已選擇）", ["全部"] + avail_partno_r,
             key="r_partno", disabled=partno_locked,
         )
