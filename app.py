@@ -300,18 +300,25 @@ def shift_month(ym: str, months: int) -> str:
     return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
 
 
+def _apply_filter(scope, col, selected):
+    """selected 是 multiselect 回傳的 list；空 list 代表不篩選（=全部）。"""
+    if selected:
+        scope = scope[scope[col].isin(selected)]
+    return scope
+
+
 def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_partno, f_branch, f_payment):
     """查找年月(起始~結束) 整段期間內的耗用量加總。
-    2026/08 更新：加了「有無償」篩選、「當期耗用金額」欄位（用小計加總），
-    並在最後加一列總計。"""
+    2026/08 更新：類別/機型/故障部位/零件料號/維修分公司/有無償 都改成多選
+    （list，空 list = 不篩選），加了「當期耗用金額」欄位，最後加一列總計。"""
     scope = usage_df[(usage_df["年月"] >= start_ym) & (usage_df["年月"] <= end_ym)]
-    if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
+    scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
-    if f_model != "全部": scope = scope[scope["機型"] == f_model]
-    if f_part != "全部": scope = scope[scope["故障部位"] == f_part]
-    if f_partno != "全部": scope = scope[scope["零件料號"] == f_partno]
-    if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
-    if f_payment != "全部": scope = scope[scope["有無償"] == f_payment]
+    scope = _apply_filter(scope, "機型", f_model)
+    scope = _apply_filter(scope, "故障部位", f_part)
+    scope = _apply_filter(scope, "零件料號", f_partno)
+    scope = _apply_filter(scope, "維修分公司", f_branch)
+    scope = _apply_filter(scope, "有無償", f_payment)
 
     group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
     qty_col = ASSUMED_USAGE_COLUMNS["qty"]
@@ -355,24 +362,39 @@ def earliest_shipment_year(year_cols) -> int:
     return min(years) if years else None
 
 
+def earliest_nonzero_year_for_model(shipment_df, year_cols, model) -> int:
+    """2026/08 新增：不是抓檔案裡最早的年度欄位，而是抓「這個機型」出貨量
+    第一次不為 0 的那一年（例如檔案從2010年開始有欄位，但這台機型是2016年
+    才開始賣，就回傳2016）。找不到機型或全部是0，退回檔案最早年度。"""
+    row = shipment_df[shipment_df[SHIPMENT_MODEL_COL] == model]
+    if row.empty:
+        return earliest_shipment_year(year_cols)
+    years_sorted = sorted(
+        (int(SHIPMENT_YEAR_COL_PATTERN.match(c).group(1)), c) for c in year_cols
+    )
+    for y, c in years_sorted:
+        if row[c].sum() > 0:
+            return y
+    return earliest_shipment_year(year_cols)
+
+
 def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
     scope = usage_df
-    if f_cat != "全部": scope = scope[scope["類別"] == f_cat]
+    scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
-    if f_model != "全部": scope = scope[scope["機型"] == f_model]
-    if f_part != "全部": scope = scope[scope["故障部位"] == f_part]
-    if f_partno != "全部": scope = scope[scope["零件料號"] == f_partno]
-    if f_branch != "全部": scope = scope[scope["維修分公司"] == f_branch]
+    scope = _apply_filter(scope, "機型", f_model)
+    scope = _apply_filter(scope, "故障部位", f_part)
+    scope = _apply_filter(scope, "零件料號", f_partno)
+    scope = _apply_filter(scope, "維修分公司", f_branch)
     return scope
 
 
 def rate_table(usage_df, shipment_df, year_cols, end_ym,
                 f_cat, f_io, f_model, f_part, f_partno):
-    """2026/08 大改：拿掉「維修分公司別」篩選（結果仍會顯示該欄位），
-    只留「該月/該料號累積故障率」一欄，新增「累積故障數量」欄位，
-    最後加一列總計（故障率欄位加總沒意義，顯示「-」）。
-    算法：累積耗用數量 ÷ 累積出貨量，都是最早年度/01/01 ~ end_ym 月底。"""
-    scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, "全部")
+    """2026/08 大改：類別/機型/故障部位/零件料號 都改成多選。
+    算法：累積耗用數量 ÷ 累積出貨量，都是（該機型最早非0年度）/01/01 ~
+    end_ym 月底。當選了多個機型時，各自機型用各自的最早年度計算，互不影響。"""
+    scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, [])
     group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
     combos = scope[group_cols].drop_duplicates()
 
@@ -432,6 +454,15 @@ def safe_selectbox(label, options, key, disabled=False, **kwargs):
     if key in st.session_state and st.session_state[key] not in options:
         st.session_state[key] = "全部" if "全部" in options else (options[0] if options else "")
     return st.selectbox(label, options, key=key, disabled=disabled, **kwargs)
+
+
+def safe_multiselect(label, options, key, disabled=False, **kwargs):
+    """multiselect 版的防呆：上游條件變了之後，把選項清單裡已經不存在的
+    殘留選擇值濾掉，不會整個炸掉或卡住矛盾組合。空清單＝不篩選（全部）。"""
+    if key in st.session_state:
+        st.session_state[key] = [v for v in st.session_state[key] if v in options]
+    return st.multiselect(label, options, key=key, disabled=disabled,
+                           placeholder="全部（不選＝全部）", **kwargs)
 
 
 CUSTOM_CSS = """
@@ -534,33 +565,35 @@ def main():
     with tab_usage:
         st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
         with st.container(border=True):
+            # 一行固定4個框，整齊排版
             r1 = st.columns(4)
             start_ym = r1[0].text_input("查找年月（起始，YYYY-MM）", value="2021-01", key="u_start")
             end_ym = r1[1].text_input("查找年月（結束，YYYY-MM）", value="2026-07", key="u_end")
-            f_cat = r1[2].selectbox("類別", ["全部"] + all_cats, key="u_cat")
+            f_cat = r1[2].multiselect("類別", all_cats, key="u_cat", placeholder="全部（不選＝全部）")
             f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
 
             model_scope = model_map
-            if f_cat != "全部": model_scope = model_scope[model_scope["類別"] == f_cat]
+            if f_cat: model_scope = model_scope[model_scope["類別"].isin(f_cat)]
             if f_io != "全部": model_scope = model_scope[model_scope["內外機"] == f_io]
             avail_models = sorted(model_scope["機型"].unique().tolist())
 
             r2 = st.columns(4)
-            f_model = safe_selectbox("機型", ["全部"] + avail_models, key="u_model")
-            f_part = r2[1].selectbox("故障部位", ["全部"] + all_parts, key="u_part")
+            f_model = safe_multiselect("機型", avail_models, key="u_model")
+            f_part = r2[1].multiselect("故障部位", all_parts, key="u_part", placeholder="全部（不選＝全部）")
             # 2026/08：拿掉「需先選故障部位才能選零件料號」的限制，沒選故障部位時列全部已知料號
-            avail_partno = sorted(CATEGORY_TO_CODES.get(f_part, [])) if f_part != "全部" \
+            avail_partno = sorted({c for p in f_part for c in CATEGORY_TO_CODES.get(p, [])}) if f_part \
                 else sorted(CODE_TO_CATEGORY.keys())
-            f_partno = safe_selectbox("零件料號", ["全部"] + avail_partno, key="u_partno")
-            f_branch = r2[3].selectbox("維修分公司別", ["全部"] + all_branches, key="u_branch")
+            f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno")
+            f_branch = r2[3].multiselect("維修分公司別", all_branches, key="u_branch", placeholder="全部（不選＝全部）")
 
-            f_payment = st.selectbox("有無償", ["全部"] + all_payments, key="u_payment")
+            r3 = st.columns(4)
+            f_payment = r3[0].multiselect("有無償", all_payments, key="u_payment", placeholder="全部（不選＝全部）")
 
         result, scope = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
                                      f_part, f_partno, f_branch, f_payment)
         st.markdown(
             f'<div class="note-box">📌 當期 = 查找年月（起始 {start_ym} ~ 結束 {end_ym}）；'
-            f'最下面一列「總計」是這次查詢條件下所有列的加總。</div>',
+            f'最下面一列「總計」是這次查詢條件下所有列的加總；篩選條件不選任何選項＝該條件不篩選（全部）。</div>',
             unsafe_allow_html=True,
         )
         st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
@@ -575,20 +608,23 @@ def main():
             st.markdown('<div class="section-title">當期耗用量圖表</div>', unsafe_allow_html=True)
             try:
                 import altair as alt
+                base = alt.Chart(chart_data).encode(
+                    x=alt.X("維修分公司:N", sort="-y", title=None,
+                            axis=alt.Axis(labelAngle=-30, labelFontSize=12, domain=False, ticks=False)),
+                    y=alt.Y("當期耗用量:Q", title="當期耗用量",
+                            axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
+                    color=alt.Color(
+                        "有無償:N",
+                        scale=alt.Scale(range=["#1c3a5e", "#c96f3e", "#4a8f63"]),
+                        legend=alt.Legend(title=None, orient="top", symbolType="circle"),
+                    ),
+                    tooltip=["維修分公司", "有無償", "當期耗用量"],
+                )
                 chart = (
-                    alt.Chart(chart_data)
-                    .mark_bar()
-                    .encode(
-                        x=alt.X("維修分公司:N", sort="-y", title=None),
-                        y=alt.Y("當期耗用量:Q"),
-                        color=alt.Color(
-                            "有無償:N",
-                            scale=alt.Scale(range=["#1c3a5e", "#c96f3e", "#3f7a4e"]),
-                            legend=alt.Legend(title=None, orient="top"),
-                        ),
-                        tooltip=["維修分公司", "有無償", "當期耗用量"],
-                    )
-                    .properties(height=360)
+                    base.mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                    .properties(height=380)
+                    .configure_view(strokeWidth=0)
+                    .configure_axis(labelColor="#5a6472", titleColor="#5a6472")
                 )
                 st.altair_chart(chart, use_container_width=True)
             except ImportError:
@@ -596,39 +632,49 @@ def main():
 
     # ---------------- 故障率 ----------------
     with tab_rate:
-        earliest_label = f"{earliest_year}/01" if earliest_year else "資料最早年月"
         st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
         with st.container(border=True):
             r1 = st.columns(4)
-            end_ym_r = r1[0].text_input(
+            f_cat_r = r1[0].multiselect("類別", all_cats, key="r_cat", placeholder="全部（不選＝全部）")
+            f_io_r = r1[1].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
+
+            model_scope_r = model_map
+            if f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
+            if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
+            avail_models_r = sorted(model_scope_r["機型"].unique().tolist())
+            f_model_r = safe_multiselect("機型", avail_models_r, key="r_model")
+
+            f_part_r = r1[3].multiselect("故障部位", all_parts, key="r_part", placeholder="全部（不選＝全部）")
+
+            # 動態起點：只選了單一機型時，用該機型第一次出貨不為0的年度；
+            # 沒選或選了多個機型時，用檔案裡最早的年度當通用說明
+            if len(f_model_r) == 1:
+                start_year_for_label = earliest_nonzero_year_for_model(shipment_df, year_cols, f_model_r[0])
+            else:
+                start_year_for_label = earliest_shipment_year(year_cols)
+            earliest_label = f"{start_year_for_label}/01" if start_year_for_label else "資料最早年月"
+
+            r2 = st.columns(4)
+            end_ym_r = r2[0].text_input(
                 f"查找年月（YYYY-MM，代表 {earliest_label} ~ 該月，依實際資料自動判斷起點）",
                 value="2026-07", key="r_month",
             )
-            f_cat_r = r1[1].selectbox("類別", ["全部"] + all_cats, key="r_cat")
-            f_io_r = r1[2].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
 
-            model_scope_r = model_map
-            if f_cat_r != "全部": model_scope_r = model_scope_r[model_scope_r["類別"] == f_cat_r]
-            if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
-            avail_models_r = sorted(model_scope_r["機型"].unique().tolist())
-            f_model_r = safe_selectbox("機型", ["全部"] + avail_models_r, key="r_model")
-
-            r2 = st.columns(2)
-            f_part_r = r2[0].selectbox("故障部位", ["全部"] + all_parts, key="r_part")
-
-            partno_locked = not (f_cat_r and f_io_r and f_model_r and f_part_r) or f_part_r == "全部"
-            avail_partno_r = sorted(CATEGORY_TO_CODES.get(f_part_r, [])) \
-                if (not partno_locked and f_part_r != "全部") else []
-            f_partno_r = safe_selectbox(
-                "零件料號（需前面條件都已選擇）", ["全部"] + avail_partno_r,
+            partno_locked = not (f_cat_r and f_model_r and f_part_r) or f_io_r == ""
+            avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) \
+                if (not partno_locked and f_part_r) else []
+            f_partno_r = safe_multiselect(
+                "零件料號（需前面條件都已選擇）", avail_partno_r,
                 key="r_partno", disabled=partno_locked,
             )
             if partno_locked:
-                st.caption("🔒 零件料號需要前面所有條件都選了才能開放；留空 = 該機型所有零件加總")
+                st.caption("🔒 零件料號需要類別/機型/故障部位都選了才能開放；不選 = 該範圍所有零件加總")
 
-        if f_model_r != "全部":
-            ship_total = cumulative_shipment(shipment_df, year_cols, f_model_r, end_ym_r)
-            st.info(f"📦 {f_model_r}（{earliest_label}~{end_ym_r}）出貨數量：{int(ship_total)} 台")
+        if len(f_model_r) == 1:
+            ship_total = cumulative_shipment(shipment_df, year_cols, f_model_r[0], end_ym_r)
+            st.info(f"📦 {f_model_r[0]}（{earliest_label}~{end_ym_r}）出貨數量：{int(ship_total)} 台")
+        elif len(f_model_r) > 1:
+            st.info("📦 已選多個機型，各機型的累積出貨量請看下方表格的「累積故障數量」與故障率換算。")
 
         result_r = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
                                f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r)
