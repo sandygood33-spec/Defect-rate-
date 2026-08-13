@@ -847,7 +847,7 @@ def main():
             f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno", container=r2[2])
 
         if end_ym_r is not None:
-            st.caption(f"📌 代表 {earliest_label} ~ {selected_year_label}；"
+            st.caption(f"📌 代表 {earliest_label} ～ {selected_year_label}；"
                        f"去年/前年累積故障率是同一組合往前推1年/2年，一律算到該年12月底。")
 
         if end_ym_r is None:
@@ -855,7 +855,7 @@ def main():
 
         if len(f_model_r) == 1:
             ship_total = cumulative_shipment(shipment_df, year_cols, f_model_r[0], end_ym_r)
-            st.info(f"📦 {f_model_r[0]}（{earliest_label}~{end_ym_r}）出貨數量：{int(ship_total)} 台")
+            st.info(f"📦 {f_model_r[0]}（{earliest_label}～{end_ym_r}）出貨數量：{int(ship_total)} 台")
         elif len(f_model_r) > 1:
             # 2026/08：選多個機型時，逐一列出各機型自己的累積出貨量，不再只顯示提示文字
             lines = []
@@ -863,7 +863,7 @@ def main():
                 m_start = earliest_nonzero_year_for_model(shipment_df, year_cols, m)
                 m_start_label = f"{m_start}/01" if m_start else "資料最早年月"
                 m_ship = cumulative_shipment(shipment_df, year_cols, m, end_ym_r)
-                lines.append(f"　・{m}（{m_start_label}~{end_ym_r}）出貨數量：{int(m_ship)} 台")
+                lines.append(f"　・{m}（{m_start_label}～{end_ym_r}）出貨數量：{int(m_ship)} 台")
             more_note = f"\n（僅顯示前20個機型，共選了{len(f_model_r)}個）" if len(f_model_r) > 20 else ""
             st.info("📦 已選多個機型，各機型累積出貨量：\n" + "\n".join(lines) + more_note)
 
