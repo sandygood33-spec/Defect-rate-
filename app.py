@@ -65,6 +65,22 @@ NAME_TO_CATEGORY = {"壓縮機(渦卷INV)": "壓縮機", "壓縮機(渦卷INV)1.
 
 KNOWN_CATEGORIES = ["位子板", "停止閥", "傳感器", "儲液器", "其他", "四通閥本體", "壓縮機", "外殼(前/底/側板)", "工作閥", "底座", "排水接頭", "排水泵浦", "排水頭", "擺動馬達", "曲軸箱加熱器", "格柵", "機板", "毛細管", "水平羽根", "水盤", "熱交換器(蒸發器/冷凝器)", "熱敏電阻", "線圈", "軸承", "連接線", "防震墊", "隔音棉", "電源線", "電磁閥本體", "風扇葉片", "風扇轉子", "風扇馬達", "馬達固定架", "冷媒"]
 
+# 2026/08 新增：類別下拉選單的顯示順序（使用者指定，不是照字母/筆畫排序）
+CATEGORY_ORDER = ["家用 大關", "家用 吊隱", "家用 多聯", "家用 經典/豪菁", "家用 橫綱", "商用", "VRV",
+                   "空氣清淨機", "乾衣/清淨除濕機", "全熱交換器(新風換氣機)", "分配箱(BP/BS)",
+                   "冰水機", "油機", "飾板", "展示機", "其他"]
+
+
+def sort_categories(cats):
+    """依 CATEGORY_ORDER 排序；清單裡沒有列到的類別，排在「其他」前面。"""
+    def key(c):
+        if c in CATEGORY_ORDER:
+            return (0, CATEGORY_ORDER.index(c))
+        if c == "其他":
+            return (2, 0)
+        return (1, c)
+    return sorted(cats, key=key)
+
 # 人工修正清單（2026/08，使用者實測後回報零件分類一覽表本身分錯/沒收錄的項目）
 # 用「品名」比對，優先權最高，蓋過內嵌分類表裡的結果。之後若零件分類
 # 一覽表更新，這裡的內容也要一併檢查是否還需要。
@@ -247,6 +263,17 @@ def build_usage_df(usage_files_bytes: list):
     usage = usage.join(model_lookup, on=cols["model"])
     usage = usage.rename(columns={cols["model"]: "機型"})
 
+    # ⚠️ 2026/08 重要修正：以前這裡如果機型分類表沒有這個機型（join失敗，
+    # 類別/內外機變成 NaN），後面 groupby 會直接把這些列「整組排除」，
+    # 數字悄悄變少但畫面上完全看不出來。改成用「未分類機型」頂著，這樣
+    # 這些機型還是會出現在結果裡（歸在「未分類機型」類別下），不會憑空消失，
+    # 同時上面也會跳警告列出哪些機型沒有分類資料。
+    unmatched_models = sorted(
+        usage.loc[usage["類別"].isna(), "機型"].dropna().unique().tolist()
+    )
+    usage["類別"] = usage["類別"].fillna("未分類機型")
+    usage["內外機"] = usage["內外機"].fillna("未分類機型")
+
     # 故障部位：四層判定（人工修正 -> 零件編號 -> 品名精確 -> 品名關鍵字 -> 其他）
     classified = usage.apply(
         lambda r: classify_part(r[cols["part_no"]], r[cols["part_name"]]),
@@ -266,7 +293,7 @@ def build_usage_df(usage_files_bytes: list):
         .reset_index(drop=True)
     )
 
-    return usage, audit, model_map
+    return usage, audit, model_map, unmatched_models
 
 
 @st.cache_data(show_spinner=False)
@@ -376,6 +403,34 @@ def earliest_nonzero_year_for_model(shipment_df, year_cols, model) -> int:
         if row[c].sum() > 0:
             return y
     return earliest_shipment_year(year_cols)
+
+
+def build_year_options(shipment_df, year_cols, usage_df):
+    """2026/08 新增：歷年累積故障率的「查找年月」改成年度下拉選單，不能選
+    月/日。過去年度顯示「YYYY」，代表算到該年12月底；今年這種還沒過完的
+    年度，顯示「YYYY/MM」（MM=今天往前推一個月，也就是最後一個完整月），
+    以後每年會依系統當天日期自動這樣算，不用每年手動改。
+    回傳 [(顯示文字, 對應的end_ym), ...]，由舊到新排序。"""
+    years = {int(SHIPMENT_YEAR_COL_PATTERN.match(c).group(1)) for c in year_cols}
+    usage_years = {int(ym.split("-")[0]) for ym in usage_df["年月"].dropna()}
+    all_years = sorted(years | usage_years)
+    if not all_years:
+        return []
+
+    today = datetime.now()
+    current_year = today.year
+    options = []
+    for y in all_years:
+        if y > current_year:
+            continue
+        if y == current_year:
+            if today.month == 1:
+                continue  # 今年還沒有任何一個完整月份，先不提供這個選項
+            last_complete_month = today.month - 1
+            options.append((f"{y}/{last_complete_month:02d}", f"{y}-{last_complete_month:02d}"))
+        else:
+            options.append((str(y), f"{y}-12"))
+    return options
 
 
 def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
@@ -533,9 +588,16 @@ def main():
                  "機型分類、零件分類已經內建在程式裡，不用再上傳。")
         return
 
-    usage_df, audit_df, model_map = build_usage_df([f.getvalue() for f in f_usage_files])
+    usage_df, audit_df, model_map, unmatched_models = build_usage_df([f.getvalue() for f in f_usage_files])
     shipment_df, year_cols = build_shipment_df(f_shipment.getvalue())
-    earliest_year = earliest_shipment_year(year_cols)
+
+    if unmatched_models:
+        st.error(
+            f"🚨 有 {len(unmatched_models)} 種機型不在內建的「機型分類表」裡，"
+            f"這些機型的資料會被歸在「未分類機型」類別下（不會消失，但也不會出現在正確的類別/機型篩選結果裡）："
+            f"{'、'.join(unmatched_models[:30])}" + ("...（僅顯示前30個）" if len(unmatched_models) > 30 else "") +
+            "\n\n請把更新過、涵蓋這些機型的「機型分類_已填寫.xlsx」給我，我重新產生內建分類資料。"
+        )
 
     unclassified = audit_df[audit_df["判定方式"] == "無法判別"]
     if len(unclassified) > 0:
@@ -553,26 +615,51 @@ def main():
             mime="text/csv",
         )
 
-    all_cats = sorted(model_map["類別"].dropna().unique().tolist())
+    all_cats = sort_categories(model_map["類別"].dropna().unique().tolist())
+    if unmatched_models:
+        all_cats = all_cats + ["未分類機型"]
     all_ios = sorted(model_map["內外機"].dropna().unique().tolist())
+    if unmatched_models:
+        all_ios = all_ios + ["未分類機型"]
     all_parts = sorted(set(KNOWN_CATEGORIES) | set(usage_df["故障部位"].dropna().unique().tolist()))
     all_branches = sorted(BRANCH_CODE_MAP.values())
     all_payments = sorted(usage_df["有無償"].dropna().unique().tolist())
 
-    tab_usage, tab_rate = st.tabs(["零件耗用一覽", "故障率"])
+    # 機型下拉選單要用的對照表：把「未分類機型」也併進去，這樣它們才會出現在
+    # 機型選單裡（不只是躲在「未分類機型」這個類別後面選不到）
+    if unmatched_models:
+        extra_models = (
+            usage_df.loc[usage_df["機型"].isin(unmatched_models), ["機型", "類別", "內外機"]]
+            .drop_duplicates()
+        )
+        model_map_display = pd.concat([model_map, extra_models], ignore_index=True)
+    else:
+        model_map_display = model_map
+
+    tab_usage, tab_rate = st.tabs(["零件耗用一覽", "歷年累積故障率"])
 
     # ---------------- 零件耗用一覽 ----------------
     with tab_usage:
+        # 2026/08：預設起訖不再寫死 2021-01，改成抓資料裡實際的最早/最晚故障日，
+        # 避免上傳了更早年份的資料卻因為預設值沒改而被漏算
+        fault_dates = pd.to_datetime(usage_df[ASSUMED_USAGE_COLUMNS["fault_date"]], errors="coerce")
+        default_start_date = fault_dates.min()
+        default_end_date = fault_dates.max()
+        default_start_date = default_start_date.date() if pd.notna(default_start_date) else date.today()
+        default_end_date = default_end_date.date() if pd.notna(default_end_date) else date.today()
+
         st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
         with st.container(border=True):
-            # 一行固定4個框，整齊排版
+            # 一行固定4個框，整齊排版；查找年月改成日曆選擇（只取年月，日期不影響邏輯）
             r1 = st.columns(4)
-            start_ym = r1[0].text_input("查找年月（起始，YYYY-MM）", value="2021-01", key="u_start")
-            end_ym = r1[1].text_input("查找年月（結束，YYYY-MM）", value="2026-07", key="u_end")
+            start_date_in = r1[0].date_input("查找年月（起始）", value=default_start_date, key="u_start_date")
+            end_date_in = r1[1].date_input("查找年月（結束）", value=default_end_date, key="u_end_date")
+            start_ym = f"{start_date_in.year:04d}-{start_date_in.month:02d}"
+            end_ym = f"{end_date_in.year:04d}-{end_date_in.month:02d}"
             f_cat = r1[2].multiselect("類別", all_cats, key="u_cat", placeholder="全部（不選＝全部）")
             f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
 
-            model_scope = model_map
+            model_scope = model_map_display
             if f_cat: model_scope = model_scope[model_scope["類別"].isin(f_cat)]
             if f_io != "全部": model_scope = model_scope[model_scope["內外機"] == f_io]
             avail_models = sorted(model_scope["機型"].unique().tolist())
@@ -630,7 +717,7 @@ def main():
             except ImportError:
                 st.bar_chart(chart_data, x="維修分公司", y="當期耗用量", color="有無償")
 
-    # ---------------- 故障率 ----------------
+    # ---------------- 歷年累積故障率 ----------------
     with tab_rate:
         st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
         with st.container(border=True):
@@ -638,7 +725,7 @@ def main():
             f_cat_r = r1[0].multiselect("類別", all_cats, key="r_cat", placeholder="全部（不選＝全部）")
             f_io_r = r1[1].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
 
-            model_scope_r = model_map
+            model_scope_r = model_map_display
             if f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
             if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
             avail_models_r = sorted(model_scope_r["機型"].unique().tolist())
@@ -654,11 +741,21 @@ def main():
                 start_year_for_label = earliest_shipment_year(year_cols)
             earliest_label = f"{start_year_for_label}/01" if start_year_for_label else "資料最早年月"
 
+            # 2026/08：查找年月改成只能選「年」，不能選月/日；今年這種還沒過完的
+            # 年度，選項文字會自動顯示到最後一個完整月份（依系統當天日期算，逐年適用）
+            year_opts = build_year_options(shipment_df, year_cols, usage_df)
+            year_labels = [lbl for lbl, _ in year_opts]
+            year_end_map = dict(year_opts)
             r2 = st.columns(4)
-            end_ym_r = r2[0].text_input(
-                f"查找年月（YYYY-MM，代表 {earliest_label} ~ 該月，依實際資料自動判斷起點）",
-                value="2026-07", key="r_month",
-            )
+            if year_labels:
+                selected_year_label = r2[0].selectbox(
+                    "查找年月（年度）", year_labels, index=len(year_labels) - 1, key="r_year",
+                )
+                end_ym_r = year_end_map[selected_year_label]
+            else:
+                st.warning("出貨資料裡找不到任何年度欄位，無法選擇查找年月。")
+                end_ym_r = None
+            st.caption(f"代表 {earliest_label} ~ {selected_year_label if year_labels else '-'}")
 
             partno_locked = not (f_cat_r and f_model_r and f_part_r) or f_io_r == ""
             avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) \
@@ -669,6 +766,9 @@ def main():
             )
             if partno_locked:
                 st.caption("🔒 零件料號需要類別/機型/故障部位都選了才能開放；不選 = 該範圍所有零件加總")
+
+        if end_ym_r is None:
+            return
 
         if len(f_model_r) == 1:
             ship_total = cumulative_shipment(shipment_df, year_cols, f_model_r[0], end_ym_r)
