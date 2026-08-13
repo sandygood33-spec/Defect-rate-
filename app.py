@@ -652,8 +652,17 @@ def main():
         with st.container(border=True):
             # 一行固定4個框，整齊排版；查找年月改成日曆選擇（只取年月，日期不影響邏輯）
             r1 = st.columns(4)
-            start_date_in = r1[0].date_input("查找年月（起始）", value=default_start_date, key="u_start_date")
-            end_date_in = r1[1].date_input("查找年月（結束）", value=default_end_date, key="u_end_date")
+            # 2026/08 修bug：沒指定 min/max 時，Streamlit 會用「這個欄位自己的預設值」
+            # 去推算大約±10年的可選範圍，導致起始欄位（預設2015）選不到2026年。
+            # 改成兩邊都明確用「資料實際最早~最晚日期」當範圍上下限，才不會各自亂猜。
+            start_date_in = r1[0].date_input(
+                "查找年月（起始）", value=default_start_date,
+                min_value=default_start_date, max_value=default_end_date, key="u_start_date",
+            )
+            end_date_in = r1[1].date_input(
+                "查找年月（結束）", value=default_end_date,
+                min_value=default_start_date, max_value=default_end_date, key="u_end_date",
+            )
             start_ym = f"{start_date_in.year:04d}-{start_date_in.month:02d}"
             end_ym = f"{end_date_in.year:04d}-{end_date_in.month:02d}"
             f_cat = r1[2].multiselect("類別", all_cats, key="u_cat", placeholder="全部（不選＝全部）")
