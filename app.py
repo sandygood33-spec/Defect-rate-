@@ -143,7 +143,7 @@ USAGE_TABLE_COLS = [
 ]
 RATE_TABLE_COLS = [
     "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司",
-    "累積故障數量", "該月/該料號累積故障率",
+    "累積故障數量", "該月/該料號累積故障率", "去年累積故障率", "前年累積故障率",
 ]
 
 
@@ -445,50 +445,102 @@ def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
 
 
 def rate_table(usage_df, shipment_df, year_cols, end_ym,
-                f_cat, f_io, f_model, f_part, f_partno):
-    """2026/08 大改：類別/機型/故障部位/零件料號 都改成多選。
+                f_cat, f_io, f_model, f_part, f_partno, f_branch):
+    """2026/08 大改：
+    - 類別/機型/故障部位/零件料號/維修分公司 都改成多選（零件料號不再鎖定）
+    - 新增「去年累積故障率」「前年累積故障率」兩欄（同一組合，基準年往前推
+      1年/2年，一律算到該年12月底）
+    - 總計列的故障率也真的算（用所有組合的累積故障數量加總 ÷ 各機型累積
+      出貨量加總，每個機型只算一次，不會因為同機型有多列而重複計算出貨量）
+    - 回傳 (result_df, red_flags)：red_flags 是跟 result_df 同樣長度的
+      bool list，True 代表「該月故障率」比「去年累積故障率」成長超過3成，
+      畫面上要整列反紅
     算法：累積耗用數量 ÷ 累積出貨量，都是（該機型最早非0年度）/01/01 ~
-    end_ym 月底。當選了多個機型時，各自機型用各自的最早年度計算，互不影響。"""
-    scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, [])
+    基準月底。當選了多個機型時，各自機型用各自的最早年度計算，互不影響。"""
+    scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch)
     group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
     combos = scope[group_cols].drop_duplicates()
 
     if combos.empty:
-        return pd.DataFrame(columns=RATE_TABLE_COLS)
+        return pd.DataFrame(columns=RATE_TABLE_COLS), []
 
-    sub = scope[scope["年月"] <= end_ym]
-    cum_end = (
-        sub.groupby(group_cols)[ASSUMED_USAGE_COLUMNS["qty"]].sum()
-        if not sub.empty else pd.Series(dtype=float)
-    )
+    end_year = int(end_ym.split("-")[0])
+    last_year_end = f"{end_year - 1}-12"
+    two_years_ago_end = f"{end_year - 2}-12"
+
+    def cumulative_qty_by_combo(target_ym):
+        sub = scope[scope["年月"] <= target_ym]
+        if sub.empty:
+            return pd.Series(dtype=float)
+        return sub.groupby(group_cols)[ASSUMED_USAGE_COLUMNS["qty"]].sum()
+
+    cum_end = cumulative_qty_by_combo(end_ym)
+    cum_last_year = cumulative_qty_by_combo(last_year_end)
+    cum_two_years_ago = cumulative_qty_by_combo(two_years_ago_end)
 
     combos = combos.set_index(group_cols)
     combos["累積故障數量"] = cum_end.reindex(combos.index).fillna(0)
+    combos["_qty_last_year"] = cum_last_year.reindex(combos.index).fillna(0)
+    combos["_qty_two_years_ago"] = cum_two_years_ago.reindex(combos.index).fillna(0)
     combos = combos.reset_index()
 
     unique_models = combos["機型"].unique().tolist()
     ship_end = {m: cumulative_shipment(shipment_df, year_cols, m, end_ym) for m in unique_models}
+    ship_last_year = {m: cumulative_shipment(shipment_df, year_cols, m, last_year_end) for m in unique_models}
+    ship_two_years_ago = {m: cumulative_shipment(shipment_df, year_cols, m, two_years_ago_end) for m in unique_models}
 
     def safe_rate(qty, ship):
         return (qty / ship) if ship else None
 
-    combos["該月/該料號累積故障率"] = combos.apply(
-        lambda r: safe_rate(r["累積故障數量"], ship_end[r["機型"]]), axis=1
+    combos["_rate_end"] = combos.apply(lambda r: safe_rate(r["累積故障數量"], ship_end[r["機型"]]), axis=1)
+    combos["_rate_last_year"] = combos.apply(
+        lambda r: safe_rate(r["_qty_last_year"], ship_last_year[r["機型"]]), axis=1
     )
-    combos = combos.rename(columns={"內外機": "室內/外機"})
-    combos["該月/該料號累積故障率"] = combos["該月/該料號累積故障率"].apply(
-        lambda v: f"{v:.2%}" if pd.notna(v) else "-"
+    combos["_rate_two_years_ago"] = combos.apply(
+        lambda r: safe_rate(r["_qty_two_years_ago"], ship_two_years_ago[r["機型"]]), axis=1
     )
+
+    # 異常反紅：該月故障率比去年累積故障率成長超過3成
+    def is_anomaly(row):
+        cur, prev = row["_rate_end"], row["_rate_last_year"]
+        if pd.isna(cur) or pd.isna(prev) or prev <= 0:
+            return False
+        return (cur - prev) / prev > 0.3
+
+    red_flags = combos.apply(is_anomaly, axis=1).tolist()
+
+    combos = combos.rename(columns={
+        "內外機": "室內/外機",
+        "_rate_end": "該月/該料號累積故障率",
+        "_rate_last_year": "去年累積故障率",
+        "_rate_two_years_ago": "前年累積故障率",
+    })
+    for c in ["該月/該料號累積故障率", "去年累積故障率", "前年累積故障率"]:
+        combos[c] = combos[c].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "-")
     result = combos[RATE_TABLE_COLS]
 
     if len(result) > 0:
+        total_qty = result["累積故障數量"].sum()
+        total_ship_end = sum(ship_end[m] for m in unique_models)
+        total_ship_last_year = sum(ship_last_year[m] for m in unique_models)
+        total_ship_two_years_ago = sum(ship_two_years_ago[m] for m in unique_models)
         total_row = {c: "" for c in RATE_TABLE_COLS}
         total_row["類別"] = "總計"
-        total_row["累積故障數量"] = result["累積故障數量"].sum()
-        total_row["該月/該料號累積故障率"] = "-"
+        total_row["累積故障數量"] = total_qty
+        total_row["該月/該料號累積故障率"] = (
+            f"{total_qty/total_ship_end:.2%}" if total_ship_end else "-"
+        )
+        total_qty_last_year = combos["_qty_last_year"].sum()
+        total_row["去年累積故障率"] = (
+            f"{total_qty_last_year/total_ship_last_year:.2%}" if total_ship_last_year else "-"
+        )
+        total_row["前年累積故障率"] = (
+            f"{combos['_qty_two_years_ago'].sum()/total_ship_two_years_ago:.2%}" if total_ship_two_years_ago else "-"
+        )
         result = pd.concat([result, pd.DataFrame([total_row])], ignore_index=True)
+        red_flags = red_flags + [False]  # 總計列不參與反紅判斷
 
-    return result
+    return result, red_flags
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +782,7 @@ def main():
     with tab_rate:
         st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
         with st.container(border=True):
+            # 一行固定4個框，跟零件耗用一覽同款排版
             r1 = st.columns(4)
             f_cat_r = r1[0].multiselect("類別", all_cats, key="r_cat", placeholder="全部（不選＝全部）")
             f_io_r = r1[1].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
@@ -755,6 +808,7 @@ def main():
             year_opts = build_year_options(shipment_df, year_cols, usage_df)
             year_labels = [lbl for lbl, _ in year_opts]
             year_end_map = dict(year_opts)
+
             r2 = st.columns(4)
             if year_labels:
                 selected_year_label = r2[0].selectbox(
@@ -764,17 +818,15 @@ def main():
             else:
                 st.warning("出貨資料裡找不到任何年度欄位，無法選擇查找年月。")
                 end_ym_r = None
-            st.caption(f"代表 {earliest_label} ~ {selected_year_label if year_labels else '-'}")
+            f_branch_r = r2[1].multiselect("維修分公司別", all_branches, key="r_branch", placeholder="全部（不選＝全部）")
+            # 2026/08：零件料號不再鎖定，隨時可選（沒選故障部位時列全部已知料號）
+            avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) if f_part_r \
+                else sorted(CODE_TO_CATEGORY.keys())
+            f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno")
 
-            partno_locked = not (f_cat_r and f_model_r and f_part_r) or f_io_r == ""
-            avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) \
-                if (not partno_locked and f_part_r) else []
-            f_partno_r = safe_multiselect(
-                "零件料號（需前面條件都已選擇）", avail_partno_r,
-                key="r_partno", disabled=partno_locked,
-            )
-            if partno_locked:
-                st.caption("🔒 零件料號需要類別/機型/故障部位都選了才能開放；不選 = 該範圍所有零件加總")
+        if end_ym_r is not None:
+            st.caption(f"📌 代表 {earliest_label} ~ {selected_year_label}；"
+                       f"去年/前年累積故障率是同一組合往前推1年/2年，一律算到該年12月底。")
 
         if end_ym_r is None:
             return
@@ -785,11 +837,21 @@ def main():
         elif len(f_model_r) > 1:
             st.info("📦 已選多個機型，各機型的累積出貨量請看下方表格的「累積故障數量」與故障率換算。")
 
-        result_r = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
-                               f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r)
+        result_r, red_flags = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
+                                          f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
         st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-        st.caption(f"共 {max(len(result_r) - 1, 0)} 筆（不含總計列）；最下面一列為這次查詢條件的總計")
-        st.dataframe(result_r, use_container_width=True)
+        st.caption(
+            f"共 {max(len(result_r) - 1, 0)} 筆（不含總計列）；最下面一列為這次查詢條件的總計；"
+            f"紅色列代表該月故障率比去年累積故障率成長超過3成"
+        )
+        if len(result_r) > 0:
+            def _highlight(row):
+                idx = row.name
+                is_red = idx < len(red_flags) and red_flags[idx]
+                return ["background-color:#fbdada" if is_red else "" for _ in row]
+            st.dataframe(result_r.style.apply(_highlight, axis=1), use_container_width=True)
+        else:
+            st.dataframe(result_r, use_container_width=True)
         st.caption(
             "⚠️ 累積出貨量目前只能抓到「年度」粒度（出貨資料是每年一欄），"
             "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
