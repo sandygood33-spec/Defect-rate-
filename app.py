@@ -563,13 +563,16 @@ def safe_selectbox(label, options, key, disabled=False, **kwargs):
     return st.selectbox(label, options, key=key, disabled=disabled, **kwargs)
 
 
-def safe_multiselect(label, options, key, disabled=False, **kwargs):
+def safe_multiselect(label, options, key, disabled=False, container=None, **kwargs):
     """multiselect 版的防呆：上游條件變了之後，把選項清單裡已經不存在的
-    殘留選擇值濾掉，不會整個炸掉或卡住矛盾組合。空清單＝不篩選（全部）。"""
+    殘留選擇值濾掉，不會整個炸掉或卡住矛盾組合。空清單＝不篩選（全部）。
+    container：要畫在哪個 st.columns() 的格子裡；不給的話會撐滿整行寬度，
+    這是之前排版跑掉、機型/零件料號變超長的原因，記得都要傳這個參數。"""
     if key in st.session_state:
         st.session_state[key] = [v for v in st.session_state[key] if v in options]
-    return st.multiselect(label, options, key=key, disabled=disabled,
-                           placeholder="全部（不選＝全部）", **kwargs)
+    target = container if container is not None else st
+    return target.multiselect(label, options, key=key, disabled=disabled,
+                               placeholder="全部（不選＝全部）", **kwargs)
 
 
 CUSTOM_CSS = """
@@ -726,12 +729,12 @@ def main():
             avail_models = sorted(model_scope["機型"].unique().tolist())
 
             r2 = st.columns(4)
-            f_model = safe_multiselect("機型", avail_models, key="u_model")
+            f_model = safe_multiselect("機型", avail_models, key="u_model", container=r2[0])
             f_part = r2[1].multiselect("故障部位", all_parts, key="u_part", placeholder="全部（不選＝全部）")
             # 2026/08：拿掉「需先選故障部位才能選零件料號」的限制，沒選故障部位時列全部已知料號
             avail_partno = sorted({c for p in f_part for c in CATEGORY_TO_CODES.get(p, [])}) if f_part \
                 else sorted(CODE_TO_CATEGORY.keys())
-            f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno")
+            f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno", container=r2[2])
             f_branch = r2[3].multiselect("維修分公司別", all_branches, key="u_branch", placeholder="全部（不選＝全部）")
 
             r3 = st.columns(4)
@@ -791,7 +794,7 @@ def main():
             if f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
             if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
             avail_models_r = sorted(model_scope_r["機型"].unique().tolist())
-            f_model_r = safe_multiselect("機型", avail_models_r, key="r_model")
+            f_model_r = safe_multiselect("機型", avail_models_r, key="r_model", container=r1[2])
 
             f_part_r = r1[3].multiselect("故障部位", all_parts, key="r_part", placeholder="全部（不選＝全部）")
 
@@ -822,7 +825,7 @@ def main():
             # 2026/08：零件料號不再鎖定，隨時可選（沒選故障部位時列全部已知料號）
             avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) if f_part_r \
                 else sorted(CODE_TO_CATEGORY.keys())
-            f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno")
+            f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno", container=r2[2])
 
         if end_ym_r is not None:
             st.caption(f"📌 代表 {earliest_label} ~ {selected_year_label}；"
