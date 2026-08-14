@@ -355,6 +355,14 @@ def shift_month(ym: str, months: int) -> str:
 ALL_BRANCHES_OPTION = "所有據點"
 ALL_COUNTIES_OPTION = "所有縣市"
 UNKNOWN_COUNTY = "資料不明"
+# 2026/08 新增：零件耗用一覽的「機型」「故障部位」「零件料號」「有無償」
+# 「故障碼」也比照維修分公司別/縣市別，加上「所有XXX」選項，選了就不分那個
+# 欄位分組，結果收斂成更少列。
+ALL_MODELS_OPTION = "所有機型"
+ALL_FAULTPARTS_OPTION = "所有故障部位"
+ALL_PARTNO_OPTION = "所有零件料號"
+ALL_PAYMENT_OPTION = "所有有無償"
+ALL_FAULTCODE_OPTION = "所有故障碼"
 # 2026/08 新增：縣市別/故障碼，來源欄位在耗用資料裡是選填的（舊版檔案沒有這
 # 兩欄），所以不放進 ASSUMED_USAGE_COLUMNS 的必要欄位清單，缺欄位時退回「未知」。
 COUNTY_SRC_COL = "縣市別"
@@ -389,24 +397,35 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faul
     """查找年月(起始~結束) 整段期間內的耗用量加總。
     2026/08 更新：類別/機型/故障部位/故障碼/零件料號/維修分公司/有無償/縣市別
     都改成多選（list，空 list = 不篩選），加了「當期耗用金額」欄位，最後加
-    一列總計。「維修分公司別」「縣市別」都支援「所有據點/所有縣市」選項：
-    選了就不篩選、也不分組，結果直接彙總成一列，避免欄數/列數太多。"""
+    一列總計。「機型/故障部位/故障碼/零件料號/維修分公司別/縣市別」都支援
+    「所有XXX」選項：選了就不篩選、也不分組，結果直接彙總，避免欄數/列數
+    太多（「有無償」本來就只是篩選條件、不是分組欄位，所以「所有有無償」
+    只需要跳過篩選，不需要額外處理分組）。"""
     scope = usage_df[(usage_df["年月"] >= start_ym) & (usage_df["年月"] <= end_ym)]
     scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
-    scope = _apply_filter(scope, "機型", f_model)
-    scope = _apply_filter(scope, "故障部位", f_part)
-    scope = _apply_filter(scope, "故障碼", f_faultcode)
-    scope = _apply_filter(scope, "零件料號", f_partno)
-    all_branches_mode = ALL_BRANCHES_OPTION in f_branch
-    if not all_branches_mode:
-        scope = _apply_filter(scope, "維修分公司", f_branch)
-    scope = _apply_filter(scope, "有無償", f_payment)
-    all_counties_mode = ALL_COUNTIES_OPTION in f_county
-    if not all_counties_mode:
-        scope = _apply_filter(scope, "縣市別", f_county)
 
-    group_cols = ["類別", "內外機", "機型", "故障部位", "故障碼", "零件料號"] + \
+    all_models_mode = ALL_MODELS_OPTION in f_model
+    all_parts_mode = ALL_FAULTPARTS_OPTION in f_part
+    all_faultcode_mode = ALL_FAULTCODE_OPTION in f_faultcode
+    all_partno_mode = ALL_PARTNO_OPTION in f_partno
+    all_branches_mode = ALL_BRANCHES_OPTION in f_branch
+    all_counties_mode = ALL_COUNTIES_OPTION in f_county
+    all_payment_mode = ALL_PAYMENT_OPTION in f_payment
+
+    if not all_models_mode: scope = _apply_filter(scope, "機型", f_model)
+    if not all_parts_mode: scope = _apply_filter(scope, "故障部位", f_part)
+    if not all_faultcode_mode: scope = _apply_filter(scope, "故障碼", f_faultcode)
+    if not all_partno_mode: scope = _apply_filter(scope, "零件料號", f_partno)
+    if not all_branches_mode: scope = _apply_filter(scope, "維修分公司", f_branch)
+    if not all_payment_mode: scope = _apply_filter(scope, "有無償", f_payment)
+    if not all_counties_mode: scope = _apply_filter(scope, "縣市別", f_county)
+
+    group_cols = ["類別", "內外機"] + \
+        ([] if all_models_mode else ["機型"]) + \
+        ([] if all_parts_mode else ["故障部位"]) + \
+        ([] if all_faultcode_mode else ["故障碼"]) + \
+        ([] if all_partno_mode else ["零件料號"]) + \
         ([] if all_branches_mode else ["維修分公司"]) + \
         ([] if all_counties_mode else ["縣市別"])
     qty_col = ASSUMED_USAGE_COLUMNS["qty"]
@@ -416,6 +435,14 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faul
         .sum()
         .rename(columns={"內外機": "室內/外機", qty_col: "當期耗用量", amt_col: "當期耗用金額"})
     )
+    if all_models_mode:
+        result["機型"] = ALL_MODELS_OPTION
+    if all_parts_mode:
+        result["故障部位"] = ALL_FAULTPARTS_OPTION
+    if all_faultcode_mode:
+        result["故障碼"] = ALL_FAULTCODE_OPTION
+    if all_partno_mode:
+        result["零件料號"] = ALL_PARTNO_OPTION
     if all_branches_mode:
         result["維修分公司"] = ALL_BRANCHES_OPTION
     if all_counties_mode:
@@ -805,25 +832,42 @@ def main():
             model_scope = model_map_display
             if f_cat: model_scope = model_scope[model_scope["類別"].isin(f_cat)]
             if f_io != "全部": model_scope = model_scope[model_scope["內外機"] == f_io]
-            avail_models = sorted(model_scope["機型"].unique().tolist())
+            avail_models = [ALL_MODELS_OPTION] + sorted(model_scope["機型"].unique().tolist())
 
             r2 = st.columns(4)
             f_model = safe_multiselect("機型", avail_models, key="u_model", container=r2[0])
-            f_part = r2[1].multiselect("故障部位", all_parts, key="u_part", placeholder="全部（不選＝全部）")
+            f_part = r2[1].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="u_part",
+                                        placeholder="全部（不選＝全部）")
             # 2026/08：拿掉「需先選故障部位才能選零件料號」的限制，沒選故障部位時列全部已知料號
             avail_partno = sorted({c for p in f_part for c in CATEGORY_TO_CODES.get(p, [])}) if f_part \
                 else sorted(CODE_TO_CATEGORY.keys())
+            avail_partno = [ALL_PARTNO_OPTION] + avail_partno
             f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno", container=r2[2])
             f_branch = r2[3].multiselect("維修分公司別", all_branches, key="u_branch", placeholder="全部（不選＝全部）")
             if ALL_BRANCHES_OPTION in f_branch:
                 st.caption("📍 已選「所有據點」，結果會直接加總不分公司顯示，其他分公司選擇會被忽略")
 
             r3 = st.columns(4)
-            f_payment = r3[0].multiselect("有無償", all_payments, key="u_payment", placeholder="全部（不選＝全部）")
+            f_payment = r3[0].multiselect("有無償", [ALL_PAYMENT_OPTION] + all_payments, key="u_payment",
+                                           placeholder="全部（不選＝全部）")
             f_county = r3[1].multiselect("縣市別", all_counties, key="u_county", placeholder="全部（不選＝全部）")
             if ALL_COUNTIES_OPTION in f_county:
                 st.caption("📍 已選「所有縣市」，結果會直接加總不分縣市顯示，其他縣市選擇會被忽略")
-            f_faultcode = safe_multiselect("故障碼", all_fault_codes, key="u_faultcode", container=r3[2])
+            f_faultcode = safe_multiselect("故障碼", [ALL_FAULTCODE_OPTION] + all_fault_codes,
+                                            key="u_faultcode", container=r3[2])
+
+            selected_all_labels = [
+                lbl for cond, lbl in [
+                    (ALL_MODELS_OPTION in f_model, "機型"),
+                    (ALL_FAULTPARTS_OPTION in f_part, "故障部位"),
+                    (ALL_PARTNO_OPTION in f_partno, "零件料號"),
+                    (ALL_PAYMENT_OPTION in f_payment, "有無償"),
+                    (ALL_FAULTCODE_OPTION in f_faultcode, "故障碼"),
+                ] if cond
+            ]
+            if selected_all_labels:
+                st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels)}」，"
+                           f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
 
         result, scope = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
                                      f_part, f_faultcode, f_partno, f_branch, f_payment, f_county)
@@ -943,11 +987,37 @@ def main():
             f"紅色列代表該月故障率比去年累積故障率成長超過3成"
         )
         if len(result_r) > 0:
-            def _highlight(row):
-                idx = row.name
-                is_red = idx < len(red_flags) and red_flags[idx]
-                return ["background-color:#fbdada" if is_red else "" for _ in row]
-            st.dataframe(result_r.style.apply(_highlight, axis=1), use_container_width=True)
+            # 2026/08 修bug：改用 st.dataframe + Styler 在某些 Streamlit/Python
+            # 版本組合下會噴 StreamlitAPIException（Arrow序列化失敗），改成直接
+            # 輸出成 HTML 表格渲染，繞開那條有問題的序列化路徑，比較穩。
+            def _row_html(row, is_red):
+                style = ' style="background-color:#fbdada"' if is_red else ""
+                cells = "".join(f"<td>{v}</td>" for v in row)
+                return f"<tr{style}>{cells}</tr>"
+
+            header_html = "".join(f"<th>{c}</th>" for c in result_r.columns)
+            body_html = "".join(
+                _row_html(row, idx < len(red_flags) and red_flags[idx])
+                for idx, row in enumerate(result_r.itertuples(index=False, name=None))
+            )
+            table_html = f"""
+            <div style="overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+              <thead><tr style="background:#1c3a5e;color:#fff;">{header_html}</tr></thead>
+              <tbody>{body_html}</tbody>
+            </table>
+            </div>
+            <style>
+              table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
+            </style>
+            """
+            st.markdown(table_html, unsafe_allow_html=True)
+            st.download_button(
+                "下載這次查詢結果 CSV",
+                result_r.to_csv(index=False).encode("utf-8-sig"),
+                file_name="歷年累積故障率.csv",
+                mime="text/csv",
+            )
         else:
             st.dataframe(result_r, use_container_width=True)
         st.caption(
