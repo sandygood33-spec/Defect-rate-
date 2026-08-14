@@ -139,7 +139,8 @@ BRANCH_CODE_MAP = {
 }
 
 USAGE_TABLE_COLS = [
-    "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司", "當期耗用量", "當期耗用金額",
+    "類別", "室內/外機", "機型", "故障部位", "故障碼", "零件料號", "維修分公司", "縣市別",
+    "當期耗用量", "當期耗用金額",
 ]
 RATE_TABLE_COLS = [
     "類別", "室內/外機", "機型", "故障部位", "零件料號", "維修分公司",
@@ -258,6 +259,23 @@ def build_usage_df(usage_files_bytes: list):
     usage["維修分公司"] = usage[cols["repair_no"]].apply(branch_from_repair_no)
     usage["有無償"] = usage[cols["payment_type"]]
 
+    # 2026/08 新增：縣市別、故障碼（來源欄位選填，舊版檔案沒有這兩欄時退回預設值）
+    if COUNTY_SRC_COL in usage.columns:
+        raw_county = usage[COUNTY_SRC_COL].fillna("").astype(str).str.strip()
+        raw_county = raw_county.replace(COUNTY_ALIASES)
+        usage["縣市別"] = raw_county.where(raw_county.isin(COUNTY_ORDER), UNKNOWN_COUNTY)
+    else:
+        usage["縣市別"] = UNKNOWN_COUNTY
+
+    if FAULT_CODE_SRC_COL in usage.columns:
+        usage["故障碼"] = (
+            usage[FAULT_CODE_SRC_COL].fillna("").astype(str)
+            .str.replace(" ", "", regex=False).str.strip()
+        )
+        usage.loc[usage["故障碼"].isin(["", "nan"]), "故障碼"] = "未知"
+    else:
+        usage["故障碼"] = "未知"
+
     # 關聯機型分類表 -> 類別 / 內外機
     model_lookup = model_map.set_index("機型")[["類別", "內外機"]]
     usage = usage.join(model_lookup, on=cols["model"])
@@ -328,6 +346,28 @@ def shift_month(ym: str, months: int) -> str:
 
 
 ALL_BRANCHES_OPTION = "所有據點"
+ALL_COUNTIES_OPTION = "所有縣市"
+UNKNOWN_COUNTY = "資料不明"
+# 2026/08 新增：縣市別/故障碼，來源欄位在耗用資料裡是選填的（舊版檔案沒有這
+# 兩欄），所以不放進 ASSUMED_USAGE_COLUMNS 的必要欄位清單，缺欄位時退回「未知」。
+COUNTY_SRC_COL = "縣市別"
+FAULT_CODE_SRC_COL = "故障代碼"
+
+# 2026/08 新增：使用者指定的22縣市＋連江縣＝23個標準縣市，依「直轄市/縣/市」
+# 分組排序（不是字母排序）。資料裡不在這份清單、也不是下面別名清單裡的值，
+# 一律歸類成「資料不明」，不會憑空消失，也不會讓髒資料混進正式縣市選項。
+COUNTY_ORDER = [
+    "臺北市", "新北市", "桃園市", "臺中市", "臺南市", "高雄市",
+    "宜蘭縣", "新竹縣", "苗栗縣", "彰化縣", "南投縣", "雲林縣", "嘉義縣",
+    "屏東縣", "臺東縣", "花蓮縣", "澎湖縣", "金門縣", "連江縣",
+    "基隆市", "新竹市", "嘉義市",
+]
+# 「台」「臺」是同一個字的異體字，資料裡常混用；「桃園縣」是「桃園市」
+# 2014年改制前的舊名，一併視為同一個縣市，不會被誤判成「資料不明」。
+COUNTY_ALIASES = {
+    "台北市": "臺北市", "台中市": "臺中市", "台南市": "臺南市", "台東縣": "臺東縣",
+    "桃園縣": "桃園市",
+}
 
 
 def _apply_filter(scope, col, selected):
@@ -337,25 +377,31 @@ def _apply_filter(scope, col, selected):
     return scope
 
 
-def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_partno, f_branch, f_payment):
+def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faultcode,
+                 f_partno, f_branch, f_payment, f_county):
     """查找年月(起始~結束) 整段期間內的耗用量加總。
-    2026/08 更新：類別/機型/故障部位/零件料號/維修分公司/有無償 都改成多選
-    （list，空 list = 不篩選），加了「當期耗用金額」欄位，最後加一列總計。
-    「維修分公司別」選了「所有據點」時：不分公司篩選、也不分公司分組，
-    結果直接顯示「所有據點」加總後的一列，避免分公司列出來欄數/列數太多。"""
+    2026/08 更新：類別/機型/故障部位/故障碼/零件料號/維修分公司/有無償/縣市別
+    都改成多選（list，空 list = 不篩選），加了「當期耗用金額」欄位，最後加
+    一列總計。「維修分公司別」「縣市別」都支援「所有據點/所有縣市」選項：
+    選了就不篩選、也不分組，結果直接彙總成一列，避免欄數/列數太多。"""
     scope = usage_df[(usage_df["年月"] >= start_ym) & (usage_df["年月"] <= end_ym)]
     scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
     scope = _apply_filter(scope, "機型", f_model)
     scope = _apply_filter(scope, "故障部位", f_part)
+    scope = _apply_filter(scope, "故障碼", f_faultcode)
     scope = _apply_filter(scope, "零件料號", f_partno)
     all_branches_mode = ALL_BRANCHES_OPTION in f_branch
     if not all_branches_mode:
         scope = _apply_filter(scope, "維修分公司", f_branch)
     scope = _apply_filter(scope, "有無償", f_payment)
+    all_counties_mode = ALL_COUNTIES_OPTION in f_county
+    if not all_counties_mode:
+        scope = _apply_filter(scope, "縣市別", f_county)
 
-    group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號"] + \
-        ([] if all_branches_mode else ["維修分公司"])
+    group_cols = ["類別", "內外機", "機型", "故障部位", "故障碼", "零件料號"] + \
+        ([] if all_branches_mode else ["維修分公司"]) + \
+        ([] if all_counties_mode else ["縣市別"])
     qty_col = ASSUMED_USAGE_COLUMNS["qty"]
     amt_col = ASSUMED_USAGE_COLUMNS["subtotal"]
     result = (
@@ -365,6 +411,8 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_part
     )
     if all_branches_mode:
         result["維修分公司"] = ALL_BRANCHES_OPTION
+    if all_counties_mode:
+        result["縣市別"] = ALL_COUNTIES_OPTION
     result = result[USAGE_TABLE_COLS]
 
     if len(result) > 0:
@@ -694,6 +742,15 @@ def main():
     all_parts = sorted(set(KNOWN_CATEGORIES) | set(usage_df["故障部位"].dropna().unique().tolist()))
     all_branches = [ALL_BRANCHES_OPTION] + sorted(BRANCH_CODE_MAP.values())
     all_payments = sorted(usage_df["有無償"].dropna().unique().tolist())
+    # 2026/08：縣市別依使用者指定的分組順序排列（不是字母排序），
+    # 「資料不明」永遠放最後
+    present_counties = set(usage_df["縣市別"].dropna().unique().tolist())
+    all_counties = [ALL_COUNTIES_OPTION] + [c for c in COUNTY_ORDER if c in present_counties]
+    if UNKNOWN_COUNTY in present_counties:
+        all_counties = all_counties + [UNKNOWN_COUNTY]
+    all_fault_codes = sorted(
+        c for c in usage_df["故障碼"].dropna().unique().tolist() if c != "未知"
+    ) + (["未知"] if "未知" in usage_df["故障碼"].unique() else [])
 
     # 機型下拉選單要用的對照表：把「未分類機型」也併進去，這樣它們才會出現在
     # 機型選單裡（不只是躲在「未分類機型」這個類別後面選不到）
@@ -756,9 +813,13 @@ def main():
 
             r3 = st.columns(4)
             f_payment = r3[0].multiselect("有無償", all_payments, key="u_payment", placeholder="全部（不選＝全部）")
+            f_county = r3[1].multiselect("縣市別", all_counties, key="u_county", placeholder="全部（不選＝全部）")
+            if ALL_COUNTIES_OPTION in f_county:
+                st.caption("📍 已選「所有縣市」，結果會直接加總不分縣市顯示，其他縣市選擇會被忽略")
+            f_faultcode = safe_multiselect("故障碼", all_fault_codes, key="u_faultcode", container=r3[2])
 
         result, scope = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
-                                     f_part, f_partno, f_branch, f_payment)
+                                     f_part, f_faultcode, f_partno, f_branch, f_payment, f_county)
         st.markdown(
             f'<div class="note-box">📌 當期 = 查找年月（起始 {start_ym} ~ 結束 {end_ym}）；'
             f'最下面一列「總計」是這次查詢條件下所有列的加總；篩選條件不選任何選項＝該條件不篩選（全部）。</div>',
