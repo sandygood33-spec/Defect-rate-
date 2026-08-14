@@ -241,9 +241,16 @@ def build_usage_df(usage_files_bytes: list):
     直接全部合併，不需要去重（同一張維修單合法地用到同一個零件兩次的情況
     是存在的，用維修單號+零件編號去重會誤刪真實資料）。
     機型分類、故障部位分類都改用內嵌對照表，不再需要另外上傳檔案。"""
+    # 2026/08 新增：不同批次的耗用資料，「有償/無償」這欄的名稱可能會有些微
+    # 差異（例如「有償_無償」），這裡列出已知的別名，讀檔時自動對應成標準
+    # 欄名，不用每次都因為欄位名稱一點點不一樣就整份檔案被拒收。
+    COLUMN_ALIASES = {
+        "有償_無償": "有償/無償",
+    }
     dfs = []
     for i, b in enumerate(usage_files_bytes, start=1):
         df = read_any_excel(b)
+        df = df.rename(columns={k: v for k, v in COLUMN_ALIASES.items() if k in df.columns})
         validate_columns(df, list(ASSUMED_USAGE_COLUMNS.values()), f"零件耗用資料（第{i}個檔案）")
         dfs.append(df)
     usage = pd.concat(dfs, ignore_index=True)
