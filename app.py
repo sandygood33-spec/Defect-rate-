@@ -529,9 +529,12 @@ def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
     scope = usage_df
     scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
-    scope = _apply_filter(scope, "機型", f_model)
-    scope = _apply_filter(scope, "故障部位", f_part)
-    scope = _apply_filter(scope, "零件料號", f_partno)
+    if ALL_MODELS_OPTION not in f_model:
+        scope = _apply_filter(scope, "機型", f_model)
+    if ALL_FAULTPARTS_OPTION not in f_part:
+        scope = _apply_filter(scope, "故障部位", f_part)
+    if ALL_PARTNO_OPTION not in f_partno:
+        scope = _apply_filter(scope, "零件料號", f_partno)
     if ALL_BRANCHES_OPTION not in f_branch:
         scope = _apply_filter(scope, "維修分公司", f_branch)
     return scope
@@ -540,21 +543,30 @@ def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
 def rate_table(usage_df, shipment_df, year_cols, end_ym,
                 f_cat, f_io, f_model, f_part, f_partno, f_branch):
     """2026/08 大改：
-    - 類別/機型/故障部位/零件料號/維修分公司 都改成多選（零件料號不再鎖定）
+    - 類別/機型/故障部位/零件料號/維修分公司 都改成多選，且都支援「所有XXX」
+      收合選項（選了就不分那個欄位分組，結果列數變少）
     - 新增「去年累積故障率」「前年累積故障率」兩欄（同一組合，基準年往前推
       1年/2年，一律算到該年12月底）
-    - 總計列的故障率也真的算（用所有組合的累積故障數量加總 ÷ 各機型累積
-      出貨量加總，每個機型只算一次，不會因為同機型有多列而重複計算出貨量）
+    - 總計列、以及「所有機型」收合後的列，故障率都是用「這個組合底下實際
+      涵蓋到的機型」各自的累積出貨量加總當分母，每個機型只算一次，不會因為
+      同一機型出現在多列（不同故障部位/零件料號）而被重複加總出貨量
     - 回傳 (result_df, red_flags)：red_flags 是跟 result_df 同樣長度的
       bool list，True 代表「該月故障率」比「去年累積故障率」成長超過3成，
       畫面上要整列反紅
     算法：累積耗用數量 ÷ 累積出貨量，都是（該機型最早非0年度）/01/01 ~
-    基準月底。當選了多個機型時，各自機型用各自的最早年度計算，互不影響。"""
+    基準月底。當一列涵蓋多個機型時，各自機型用各自的最早年度計算，互不影響。"""
     scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch)
+
+    all_models_mode = ALL_MODELS_OPTION in f_model
+    all_parts_mode = ALL_FAULTPARTS_OPTION in f_part
+    all_partno_mode = ALL_PARTNO_OPTION in f_partno
     all_branches_mode = ALL_BRANCHES_OPTION in f_branch
-    group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號"] + \
-        ([] if all_branches_mode else ["維修分公司"])
-    combos = scope[group_cols].drop_duplicates()
+
+    # 先在「完整細節」(含機型) 的粒度算好每個組合的耗用數量與該機型的出貨量，
+    # 之後再依使用者實際想看的欄位重新彙總，這樣才能保證同一機型的出貨量
+    # 不會因為被拆到多列（不同故障部位/零件料號）而重複計入。
+    full_group_cols = ["類別", "內外機", "機型", "故障部位", "零件料號", "維修分公司"]
+    combos = scope[full_group_cols].drop_duplicates()
 
     if combos.empty:
         return pd.DataFrame(columns=RATE_TABLE_COLS), []
@@ -567,14 +579,14 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
         sub = scope[scope["年月"] <= target_ym]
         if sub.empty:
             return pd.Series(dtype=float)
-        return sub.groupby(group_cols)[ASSUMED_USAGE_COLUMNS["qty"]].sum()
+        return sub.groupby(full_group_cols)[ASSUMED_USAGE_COLUMNS["qty"]].sum()
 
     cum_end = cumulative_qty_by_combo(end_ym)
     cum_last_year = cumulative_qty_by_combo(last_year_end)
     cum_two_years_ago = cumulative_qty_by_combo(two_years_ago_end)
 
-    combos = combos.set_index(group_cols)
-    combos["累積故障數量"] = cum_end.reindex(combos.index).fillna(0)
+    combos = combos.set_index(full_group_cols)
+    combos["_qty_end"] = cum_end.reindex(combos.index).fillna(0)
     combos["_qty_last_year"] = cum_last_year.reindex(combos.index).fillna(0)
     combos["_qty_two_years_ago"] = cum_two_years_ago.reindex(combos.index).fillna(0)
     combos = combos.reset_index()
@@ -583,16 +595,54 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
     ship_end = {m: cumulative_shipment(shipment_df, year_cols, m, end_ym) for m in unique_models}
     ship_last_year = {m: cumulative_shipment(shipment_df, year_cols, m, last_year_end) for m in unique_models}
     ship_two_years_ago = {m: cumulative_shipment(shipment_df, year_cols, m, two_years_ago_end) for m in unique_models}
+    combos["_ship_end"] = combos["機型"].map(ship_end)
+    combos["_ship_last_year"] = combos["機型"].map(ship_last_year)
+    combos["_ship_two_years_ago"] = combos["機型"].map(ship_two_years_ago)
+
+    # 使用者實際想看的分組欄位（拿掉選了「所有XXX」的那幾個維度）
+    output_group_cols = ["類別", "內外機"] + \
+        ([] if all_models_mode else ["機型"]) + \
+        ([] if all_parts_mode else ["故障部位"]) + \
+        ([] if all_partno_mode else ["零件料號"]) + \
+        ([] if all_branches_mode else ["維修分公司"])
+
+    # 2026/08 修bug：pandas 3.0 起，groupby().apply() 預設會把「拿去分組的
+    # 欄位」從傳進 function 的資料裡拿掉，導致「機型」還是分組欄位時
+    # sub["機型"] 直接 KeyError。改成不用 apply()：數量用一般的
+    # groupby().sum()；出貨量分兩種情況處理——「機型」還是分組欄位時，
+    # 每組本來就只對應一個機型，直接用該機型的值；「機型」被收合掉時，
+    # 才需要额外算「這組裡有哪些不重複的機型」，把它們的出貨量加總一次
+    # （不會因為同一機型出現在多列而重複計入）。
+    qty_agg = (
+        combos.groupby(output_group_cols, dropna=False)
+        [["_qty_end", "_qty_last_year", "_qty_two_years_ago"]]
+        .sum()
+        .reset_index()
+    )
+
+    if "機型" in output_group_cols:
+        qty_agg["_ship_end"] = qty_agg["機型"].map(ship_end)
+        qty_agg["_ship_last_year"] = qty_agg["機型"].map(ship_last_year)
+        qty_agg["_ship_two_years_ago"] = qty_agg["機型"].map(ship_two_years_ago)
+    else:
+        model_sets = combos.groupby(output_group_cols, dropna=False)["機型"].agg(
+            lambda s: list(s.unique())
+        )
+        qty_agg = qty_agg.set_index(output_group_cols)
+        qty_agg["_ship_end"] = model_sets.apply(lambda ms: sum(ship_end[m] for m in ms))
+        qty_agg["_ship_last_year"] = model_sets.apply(lambda ms: sum(ship_last_year[m] for m in ms))
+        qty_agg["_ship_two_years_ago"] = model_sets.apply(lambda ms: sum(ship_two_years_ago[m] for m in ms))
+        qty_agg = qty_agg.reset_index()
+
+    agg = qty_agg.rename(columns={"_qty_end": "累積故障數量"})
 
     def safe_rate(qty, ship):
         return (qty / ship) if ship else None
 
-    combos["_rate_end"] = combos.apply(lambda r: safe_rate(r["累積故障數量"], ship_end[r["機型"]]), axis=1)
-    combos["_rate_last_year"] = combos.apply(
-        lambda r: safe_rate(r["_qty_last_year"], ship_last_year[r["機型"]]), axis=1
-    )
-    combos["_rate_two_years_ago"] = combos.apply(
-        lambda r: safe_rate(r["_qty_two_years_ago"], ship_two_years_ago[r["機型"]]), axis=1
+    agg["_rate_end"] = agg.apply(lambda r: safe_rate(r["累積故障數量"], r["_ship_end"]), axis=1)
+    agg["_rate_last_year"] = agg.apply(lambda r: safe_rate(r["_qty_last_year"], r["_ship_last_year"]), axis=1)
+    agg["_rate_two_years_ago"] = agg.apply(
+        lambda r: safe_rate(r["_qty_two_years_ago"], r["_ship_two_years_ago"]), axis=1
     )
 
     # 異常反紅：該月故障率比去年累積故障率成長超過3成
@@ -602,19 +652,25 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
             return False
         return (cur - prev) / prev > 0.3
 
-    red_flags = combos.apply(is_anomaly, axis=1).tolist()
+    red_flags = agg.apply(is_anomaly, axis=1).tolist()
 
-    combos = combos.rename(columns={
+    agg = agg.rename(columns={
         "內外機": "室內/外機",
         "_rate_end": "該月/該料號累積故障率",
         "_rate_last_year": "去年累積故障率",
         "_rate_two_years_ago": "前年累積故障率",
     })
     for c in ["該月/該料號累積故障率", "去年累積故障率", "前年累積故障率"]:
-        combos[c] = combos[c].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "-")
+        agg[c] = agg[c].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "-")
+    if all_models_mode:
+        agg["機型"] = ALL_MODELS_OPTION
+    if all_parts_mode:
+        agg["故障部位"] = ALL_FAULTPARTS_OPTION
+    if all_partno_mode:
+        agg["零件料號"] = ALL_PARTNO_OPTION
     if all_branches_mode:
-        combos["維修分公司"] = ALL_BRANCHES_OPTION
-    result = combos[RATE_TABLE_COLS]
+        agg["維修分公司"] = ALL_BRANCHES_OPTION
+    result = agg[RATE_TABLE_COLS]
 
     if len(result) > 0:
         total_qty = result["累積故障數量"].sum()
@@ -627,12 +683,12 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
         total_row["該月/該料號累積故障率"] = (
             f"{total_qty/total_ship_end:.2%}" if total_ship_end else "-"
         )
-        total_qty_last_year = combos["_qty_last_year"].sum()
+        total_qty_last_year = agg["_qty_last_year"].sum()
         total_row["去年累積故障率"] = (
             f"{total_qty_last_year/total_ship_last_year:.2%}" if total_ship_last_year else "-"
         )
         total_row["前年累積故障率"] = (
-            f"{combos['_qty_two_years_ago'].sum()/total_ship_two_years_ago:.2%}" if total_ship_two_years_ago else "-"
+            f"{agg['_qty_two_years_ago'].sum()/total_ship_two_years_ago:.2%}" if total_ship_two_years_ago else "-"
         )
         result = pd.concat([result, pd.DataFrame([total_row])], ignore_index=True)
         red_flags = red_flags + [False]  # 總計列不參與反紅判斷
@@ -922,15 +978,18 @@ def main():
             model_scope_r = model_map_display
             if f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
             if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
-            avail_models_r = sorted(model_scope_r["機型"].unique().tolist())
+            avail_models_r = [ALL_MODELS_OPTION] + sorted(model_scope_r["機型"].unique().tolist())
             f_model_r = safe_multiselect("機型", avail_models_r, key="r_model", container=r1[2])
 
-            f_part_r = r1[3].multiselect("故障部位", all_parts, key="r_part", placeholder="全部（不選＝全部）")
+            f_part_r = r1[3].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="r_part",
+                                          placeholder="全部（不選＝全部）")
 
-            # 動態起點：只選了單一機型時，用該機型第一次出貨不為0的年度；
-            # 沒選或選了多個機型時，用檔案裡最早的年度當通用說明
-            if len(f_model_r) == 1:
-                start_year_for_label = earliest_nonzero_year_for_model(shipment_df, year_cols, f_model_r[0])
+            # 動態起點：只選了單一機型（且不是「所有機型」）時，用該機型第一次
+            # 出貨不為0的年度；沒選/選多個/選「所有機型」時，用檔案裡最早的
+            # 年度當通用說明
+            specific_model = f_model_r[0] if len(f_model_r) == 1 and f_model_r[0] != ALL_MODELS_OPTION else None
+            if specific_model:
+                start_year_for_label = earliest_nonzero_year_for_model(shipment_df, year_cols, specific_model)
             else:
                 start_year_for_label = earliest_shipment_year(year_cols)
             earliest_label = f"{start_year_for_label}/01" if start_year_for_label else "資料最早年月"
@@ -956,7 +1015,19 @@ def main():
             # 2026/08：零件料號不再鎖定，隨時可選（沒選故障部位時列全部已知料號）
             avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) if f_part_r \
                 else sorted(CODE_TO_CATEGORY.keys())
+            avail_partno_r = [ALL_PARTNO_OPTION] + avail_partno_r
             f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno", container=r2[2])
+
+            selected_all_labels_r = [
+                lbl for cond, lbl in [
+                    (ALL_MODELS_OPTION in f_model_r, "機型"),
+                    (ALL_FAULTPARTS_OPTION in f_part_r, "故障部位"),
+                    (ALL_PARTNO_OPTION in f_partno_r, "零件料號"),
+                ] if cond
+            ]
+            if selected_all_labels_r:
+                st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels_r)}」，"
+                           f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
 
         if end_ym_r is not None:
             st.caption(f"📌 代表 {earliest_label} ～ {selected_year_label}；"
@@ -965,9 +1036,12 @@ def main():
         if end_ym_r is None:
             return
 
-        if len(f_model_r) == 1:
-            ship_total = cumulative_shipment(shipment_df, year_cols, f_model_r[0], end_ym_r)
-            st.info(f"📦 {f_model_r[0]}（{earliest_label}～{end_ym_r}）出貨數量：{int(ship_total)} 台")
+        if specific_model:
+            ship_total = cumulative_shipment(shipment_df, year_cols, specific_model, end_ym_r)
+            st.info(f"📦 {specific_model}（{earliest_label}～{end_ym_r}）出貨數量：{int(ship_total)} 台")
+        elif ALL_MODELS_OPTION in f_model_r:
+            st.info("📦 已選「所有機型」，各列的累積出貨量會依實際涵蓋到的機型分別加總，"
+                    "請看下方表格的「累積故障數量」與故障率換算。")
         elif len(f_model_r) > 1:
             # 2026/08：選多個機型時，逐一列出各機型自己的累積出貨量，不再只顯示提示文字
             lines = []
