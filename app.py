@@ -932,68 +932,73 @@ def main():
         with c2:
             f_shipment = st.file_uploader("② 販售開始迄今出貨資料", type=["xlsx", "xls"])
 
-    if not f_usage_files or not f_shipment:
-        st.info("請上傳①②檔案後才能開始查詢（零件耗用資料可一次選多個檔案）。"
-                 "機型分類、零件分類已經內建在程式裡，不用再上傳。"
-                 "「報修案件查詢」分頁需要另外上傳③報修案件資料才會顯示內容。")
+    usage_ready = bool(f_usage_files and f_shipment)
+
+    if not usage_ready and not f_case_files:
+        st.info("請上傳①②檔案（零件耗用一覽/歷年累積故障率用）或③檔案（報修案件查詢用），"
+                 "兩邊互相獨立，只上傳你需要的那組就好。"
+                 "機型分類、零件分類已經內建在程式裡，不用再上傳。")
         return
 
-    usage_df, audit_df, model_map, unmatched_models = build_usage_df([f.getvalue() for f in f_usage_files])
-    shipment_df, year_cols = build_shipment_df(f_shipment.getvalue())
-
-    if unmatched_models:
-        st.error(
-            f"🚨 有 {len(unmatched_models)} 種機型不在內建的「機型分類表」裡，"
-            f"這些機型的資料會被歸在「未分類機型」類別下（不會消失，但也不會出現在正確的類別/機型篩選結果裡）："
-            f"{'、'.join(unmatched_models[:30])}" + ("...（僅顯示前30個）" if len(unmatched_models) > 30 else "") +
-            "\n\n請把更新過、涵蓋這些機型的「機型分類_已填寫.xlsx」給我，我重新產生內建分類資料。"
+    if usage_ready:
+        usage_df, audit_df, model_map, unmatched_models = build_usage_df(
+            [f.getvalue() for f in f_usage_files]
         )
+        shipment_df, year_cols = build_shipment_df(f_shipment.getvalue())
 
-    unclassified = audit_df[audit_df["判定方式"] == "無法判別"]
-    if len(unclassified) > 0:
-        sample = "、".join(unclassified["零件料號"].head(30).tolist())
-        st.warning(
-            f"⚠️ 有 {len(unclassified)} 個零件料號無法自動判別故障部位，歸類為「其他」："
-            f"{sample}" + ("...（僅顯示前30個）" if len(unclassified) > 30 else "")
-        )
-    with st.expander("🔍 查看 / 匯出分類判定結果（每個零件料號是怎麼被分類的）"):
-        st.dataframe(audit_df, use_container_width=True)
-        st.download_button(
-            "下載分類判定結果 CSV",
-            audit_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="分類判定結果.csv",
-            mime="text/csv",
-        )
+        if unmatched_models:
+            st.error(
+                f"🚨 有 {len(unmatched_models)} 種機型不在內建的「機型分類表」裡，"
+                f"這些機型的資料會被歸在「未分類機型」類別下（不會消失，但也不會出現在正確的類別/機型篩選結果裡）："
+                f"{'、'.join(unmatched_models[:30])}" + ("...（僅顯示前30個）" if len(unmatched_models) > 30 else "") +
+                "\n\n請把更新過、涵蓋這些機型的「機型分類_已填寫.xlsx」給我，我重新產生內建分類資料。"
+            )
 
-    all_cats = sort_categories(model_map["類別"].dropna().unique().tolist())
-    if unmatched_models:
-        all_cats = all_cats + ["未分類機型"]
-    all_ios = sorted(model_map["內外機"].dropna().unique().tolist())
-    if unmatched_models:
-        all_ios = all_ios + ["未分類機型"]
-    all_parts = sorted(set(KNOWN_CATEGORIES) | set(usage_df["故障部位"].dropna().unique().tolist()))
-    all_branches = [ALL_BRANCHES_OPTION] + sorted(BRANCH_CODE_MAP.values())
-    all_payments = sorted(usage_df["有無償"].dropna().unique().tolist())
-    # 2026/08：縣市別依使用者指定的分組順序排列（不是字母排序），
-    # 「資料不明」永遠放最後
-    present_counties = set(usage_df["縣市別"].dropna().unique().tolist())
-    all_counties = [ALL_COUNTIES_OPTION] + [c for c in COUNTY_ORDER if c in present_counties]
-    if UNKNOWN_COUNTY in present_counties:
-        all_counties = all_counties + [UNKNOWN_COUNTY]
-    all_fault_codes = sorted(
-        c for c in usage_df["故障碼"].dropna().unique().tolist() if c != "未知"
-    ) + (["未知"] if "未知" in usage_df["故障碼"].unique() else [])
+        unclassified = audit_df[audit_df["判定方式"] == "無法判別"]
+        if len(unclassified) > 0:
+            sample = "、".join(unclassified["零件料號"].head(30).tolist())
+            st.warning(
+                f"⚠️ 有 {len(unclassified)} 個零件料號無法自動判別故障部位，歸類為「其他」："
+                f"{sample}" + ("...（僅顯示前30個）" if len(unclassified) > 30 else "")
+            )
+        with st.expander("🔍 查看 / 匯出分類判定結果（每個零件料號是怎麼被分類的）"):
+            st.dataframe(audit_df, use_container_width=True)
+            st.download_button(
+                "下載分類判定結果 CSV",
+                audit_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name="分類判定結果.csv",
+                mime="text/csv",
+            )
 
-    # 機型下拉選單要用的對照表：把「未分類機型」也併進去，這樣它們才會出現在
-    # 機型選單裡（不只是躲在「未分類機型」這個類別後面選不到）
-    if unmatched_models:
-        extra_models = (
-            usage_df.loc[usage_df["機型"].isin(unmatched_models), ["機型", "類別", "內外機"]]
-            .drop_duplicates()
-        )
-        model_map_display = pd.concat([model_map, extra_models], ignore_index=True)
-    else:
-        model_map_display = model_map
+        all_cats = sort_categories(model_map["類別"].dropna().unique().tolist())
+        if unmatched_models:
+            all_cats = all_cats + ["未分類機型"]
+        all_ios = sorted(model_map["內外機"].dropna().unique().tolist())
+        if unmatched_models:
+            all_ios = all_ios + ["未分類機型"]
+        all_parts = sorted(set(KNOWN_CATEGORIES) | set(usage_df["故障部位"].dropna().unique().tolist()))
+        all_branches = [ALL_BRANCHES_OPTION] + sorted(BRANCH_CODE_MAP.values())
+        all_payments = sorted(usage_df["有無償"].dropna().unique().tolist())
+        # 2026/08：縣市別依使用者指定的分組順序排列（不是字母排序），
+        # 「資料不明」永遠放最後
+        present_counties = set(usage_df["縣市別"].dropna().unique().tolist())
+        all_counties = [ALL_COUNTIES_OPTION] + [c for c in COUNTY_ORDER if c in present_counties]
+        if UNKNOWN_COUNTY in present_counties:
+            all_counties = all_counties + [UNKNOWN_COUNTY]
+        all_fault_codes = sorted(
+            c for c in usage_df["故障碼"].dropna().unique().tolist() if c != "未知"
+        ) + (["未知"] if "未知" in usage_df["故障碼"].unique() else [])
+
+        # 機型下拉選單要用的對照表：把「未分類機型」也併進去，這樣它們才會出現在
+        # 機型選單裡（不只是躲在「未分類機型」這個類別後面選不到）
+        if unmatched_models:
+            extra_models = (
+                usage_df.loc[usage_df["機型"].isin(unmatched_models), ["機型", "類別", "內外機"]]
+                .drop_duplicates()
+            )
+            model_map_display = pd.concat([model_map, extra_models], ignore_index=True)
+        else:
+            model_map_display = model_map
 
     # 報修案件資料是選填的，有上傳才處理
     case_df, case_unmatched_models = (None, [])
@@ -1004,251 +1009,257 @@ def main():
 
     # ---------------- 零件耗用一覽 ----------------
     with tab_usage:
-        # 2026/08：預設起訖不再寫死 2021-01，改成抓資料裡實際的最早/最晚故障日，
-        # 避免上傳了更早年份的資料卻因為預設值沒改而被漏算
-        fault_dates = pd.to_datetime(usage_df[ASSUMED_USAGE_COLUMNS["fault_date"]], errors="coerce")
-        default_start_date = fault_dates.min()
-        default_end_date = fault_dates.max()
-        default_start_date = default_start_date.date() if pd.notna(default_start_date) else date.today()
-        default_end_date = default_end_date.date() if pd.notna(default_end_date) else date.today()
-
-        st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
-        with st.container(border=True):
-            # 一行固定4個框，整齊排版；查找年月改成日曆選擇（只取年月，日期不影響邏輯）
-            r1 = st.columns(4)
-            # 2026/08 修bug：沒指定 min/max 時，Streamlit 會用「這個欄位自己的預設值」
-            # 去推算大約±10年的可選範圍，導致起始欄位（預設2015）選不到2026年。
-            # 改成兩邊都明確用「資料實際最早~最晚日期」當範圍上下限，才不會各自亂猜。
-            start_date_in = r1[0].date_input(
-                "查找年月（起始）", value=default_start_date,
-                min_value=default_start_date, max_value=default_end_date, key="u_start_date",
-            )
-            end_date_in = r1[1].date_input(
-                "查找年月（結束）", value=default_end_date,
-                min_value=default_start_date, max_value=default_end_date, key="u_end_date",
-            )
-            start_ym = f"{start_date_in.year:04d}-{start_date_in.month:02d}"
-            end_ym = f"{end_date_in.year:04d}-{end_date_in.month:02d}"
-            f_cat = r1[2].multiselect("類別", all_cats, key="u_cat", placeholder="全部（不選＝全部）")
-            f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
-
-            model_scope = model_map_display
-            if f_cat: model_scope = model_scope[model_scope["類別"].isin(f_cat)]
-            if f_io != "全部": model_scope = model_scope[model_scope["內外機"] == f_io]
-            avail_models = [ALL_MODELS_OPTION] + sorted(model_scope["機型"].unique().tolist())
-
-            r2 = st.columns(4)
-            f_model = safe_multiselect("機型", avail_models, key="u_model", container=r2[0])
-            f_part = r2[1].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="u_part",
-                                        placeholder="全部（不選＝全部）")
-            # 2026/08：拿掉「需先選故障部位才能選零件料號」的限制，沒選故障部位時列全部已知料號
-            avail_partno = sorted({c for p in f_part for c in CATEGORY_TO_CODES.get(p, [])}) if f_part \
-                else sorted(CODE_TO_CATEGORY.keys())
-            avail_partno = [ALL_PARTNO_OPTION] + avail_partno
-            f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno", container=r2[2])
-            f_branch = r2[3].multiselect("維修分公司別", all_branches, key="u_branch", placeholder="全部（不選＝全部）")
-            if ALL_BRANCHES_OPTION in f_branch:
-                st.caption("📍 已選「所有據點」，結果會直接加總不分公司顯示，其他分公司選擇會被忽略")
-
-            r3 = st.columns(4)
-            f_payment = r3[0].multiselect("有無償", [ALL_PAYMENT_OPTION] + all_payments, key="u_payment",
-                                           placeholder="全部（不選＝全部）")
-            f_county = r3[1].multiselect("縣市別", all_counties, key="u_county", placeholder="全部（不選＝全部）")
-            if ALL_COUNTIES_OPTION in f_county:
-                st.caption("📍 已選「所有縣市」，結果會直接加總不分縣市顯示，其他縣市選擇會被忽略")
-            f_faultcode = safe_multiselect("故障碼", [ALL_FAULTCODE_OPTION] + all_fault_codes,
-                                            key="u_faultcode", container=r3[2])
-
-            selected_all_labels = [
-                lbl for cond, lbl in [
-                    (ALL_MODELS_OPTION in f_model, "機型"),
-                    (ALL_FAULTPARTS_OPTION in f_part, "故障部位"),
-                    (ALL_PARTNO_OPTION in f_partno, "零件料號"),
-                    (ALL_PAYMENT_OPTION in f_payment, "有無償"),
-                    (ALL_FAULTCODE_OPTION in f_faultcode, "故障碼"),
-                ] if cond
-            ]
-            if selected_all_labels:
-                st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels)}」，"
-                           f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
-
-        result, scope = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
-                                     f_part, f_faultcode, f_partno, f_branch, f_payment, f_county)
-        st.markdown(
-            f'<div class="note-box">📌 當期 = 查找年月（起始 {start_ym} ~ 結束 {end_ym}）；'
-            f'最下面一列「總計」是這次查詢條件下所有列的加總；篩選條件不選任何選項＝該條件不篩選（全部）。</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-        st.caption(f"共 {max(len(result) - 1, 0)} 筆（不含總計列）")
-        st.dataframe(result, use_container_width=True)
-
-        # 圖表：依維修分公司分組、依有無償堆疊的當期耗用量長條圖
-        chart_data = scope.groupby(["維修分公司", "有無償"], as_index=False)[
-            ASSUMED_USAGE_COLUMNS["qty"]
-        ].sum().rename(columns={ASSUMED_USAGE_COLUMNS["qty"]: "當期耗用量"})
-        if len(chart_data) > 0:
-            st.markdown('<div class="section-title">當期耗用量圖表</div>', unsafe_allow_html=True)
-            try:
-                import altair as alt
-                base = alt.Chart(chart_data).encode(
-                    x=alt.X("維修分公司:N", sort="-y", title=None,
-                            axis=alt.Axis(labelAngle=-30, labelFontSize=12, domain=False, ticks=False)),
-                    y=alt.Y("當期耗用量:Q", title="當期耗用量",
-                            axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
-                    color=alt.Color(
-                        "有無償:N",
-                        scale=alt.Scale(range=["#1c3a5e", "#c96f3e", "#4a8f63"]),
-                        legend=alt.Legend(title=None, orient="top", symbolType="circle"),
-                    ),
-                    tooltip=["維修分公司", "有無償", "當期耗用量"],
-                )
-                chart = (
-                    base.mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-                    .properties(height=380)
-                    .configure_view(strokeWidth=0)
-                    .configure_axis(labelColor="#5a6472", titleColor="#5a6472")
-                )
-                st.altair_chart(chart, use_container_width=True)
-            except ImportError:
-                st.bar_chart(chart_data, x="維修分公司", y="當期耗用量", color="有無償")
-
-    # ---------------- 歷年累積故障率 ----------------
-    with tab_rate:
-        st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
-        with st.container(border=True):
-            # 一行固定4個框，跟零件耗用一覽同款排版
-            r1 = st.columns(4)
-            f_cat_r = r1[0].multiselect("類別", all_cats, key="r_cat", placeholder="全部（不選＝全部）")
-            f_io_r = r1[1].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
-
-            model_scope_r = model_map_display
-            if f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
-            if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
-            avail_models_r = [ALL_MODELS_OPTION] + sorted(model_scope_r["機型"].unique().tolist())
-            f_model_r = safe_multiselect("機型", avail_models_r, key="r_model", container=r1[2])
-
-            f_part_r = r1[3].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="r_part",
-                                          placeholder="全部（不選＝全部）")
-
-            # 動態起點：只選了單一機型（且不是「所有機型」）時，用該機型第一次
-            # 出貨不為0的年度；沒選/選多個/選「所有機型」時，用檔案裡最早的
-            # 年度當通用說明
-            specific_model = f_model_r[0] if len(f_model_r) == 1 and f_model_r[0] != ALL_MODELS_OPTION else None
-            if specific_model:
-                start_year_for_label = earliest_nonzero_year_for_model(shipment_df, year_cols, specific_model)
-            else:
-                start_year_for_label = earliest_shipment_year(year_cols)
-            earliest_label = f"{start_year_for_label}/01" if start_year_for_label else "資料最早年月"
-
-            # 2026/08：查找年月改成只能選「年」，不能選月/日；今年這種還沒過完的
-            # 年度，選項文字會自動顯示到最後一個完整月份（依系統當天日期算，逐年適用）
-            year_opts = build_year_options(shipment_df, year_cols, usage_df)
-            year_labels = [lbl for lbl, _ in year_opts]
-            year_end_map = dict(year_opts)
-
-            r2 = st.columns(4)
-            if year_labels:
-                selected_year_label = r2[0].selectbox(
-                    "查找年月（年度）", year_labels, index=len(year_labels) - 1, key="r_year",
-                )
-                end_ym_r = year_end_map[selected_year_label]
-            else:
-                st.warning("出貨資料裡找不到任何年度欄位，無法選擇查找年月。")
-                end_ym_r = None
-            f_branch_r = r2[1].multiselect("維修分公司別", all_branches, key="r_branch", placeholder="全部（不選＝全部）")
-            if ALL_BRANCHES_OPTION in f_branch_r:
-                st.caption("📍 已選「所有據點」，結果會直接加總不分公司顯示，其他分公司選擇會被忽略")
-            # 2026/08：零件料號不再鎖定，隨時可選（沒選故障部位時列全部已知料號）
-            avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) if f_part_r \
-                else sorted(CODE_TO_CATEGORY.keys())
-            avail_partno_r = [ALL_PARTNO_OPTION] + avail_partno_r
-            f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno", container=r2[2])
-
-            selected_all_labels_r = [
-                lbl for cond, lbl in [
-                    (ALL_MODELS_OPTION in f_model_r, "機型"),
-                    (ALL_FAULTPARTS_OPTION in f_part_r, "故障部位"),
-                    (ALL_PARTNO_OPTION in f_partno_r, "零件料號"),
-                ] if cond
-            ]
-            if selected_all_labels_r:
-                st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels_r)}」，"
-                           f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
-
-        if end_ym_r is not None:
-            st.caption(f"📌 代表 {earliest_label} ～ {selected_year_label}；"
-                       f"去年/前年累積故障率是同一組合往前推1年/2年，一律算到該年12月底。")
-
-        if end_ym_r is None:
-            return
-
-        if specific_model:
-            ship_total = cumulative_shipment(shipment_df, year_cols, specific_model, end_ym_r)
-            st.info(f"📦 {specific_model}（{earliest_label}～{end_ym_r}）出貨數量：{int(ship_total)} 台")
-        elif ALL_MODELS_OPTION in f_model_r:
-            st.info("📦 已選「所有機型」，各列的累積出貨量會依實際涵蓋到的機型分別加總，"
-                    "請看下方表格的「累積故障數量」與故障率換算。")
-        elif len(f_model_r) > 1:
-            # 2026/08：選多個機型時，逐一列出各機型自己的累積出貨量，不再只顯示提示文字
-            lines = []
-            for m in f_model_r[:20]:
-                m_start = earliest_nonzero_year_for_model(shipment_df, year_cols, m)
-                m_start_label = f"{m_start}/01" if m_start else "資料最早年月"
-                m_ship = cumulative_shipment(shipment_df, year_cols, m, end_ym_r)
-                lines.append(f"　・{m}（{m_start_label}～{end_ym_r}）出貨數量：{int(m_ship)} 台")
-            more_note = f"\n（僅顯示前20個機型，共選了{len(f_model_r)}個）" if len(f_model_r) > 20 else ""
-            st.info("📦 已選多個機型，各機型累積出貨量：\n" + "\n".join(lines) + more_note)
-
-        result_r, red_flags = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
-                                          f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
-        st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-        st.caption(
-            f"共 {max(len(result_r) - 1, 0)} 筆（不含總計列）；最下面一列為這次查詢條件的總計；"
-            f"紅色列代表該月故障率比去年累積故障率成長超過3成"
-        )
-        if len(result_r) > 0:
-            # 2026/08 修bug：改用 st.dataframe + Styler 在某些 Streamlit/Python
-            # 版本組合下會噴 StreamlitAPIException（Arrow序列化失敗），改成直接
-            # 輸出成 HTML 表格渲染，繞開那條有問題的序列化路徑，比較穩。
-            def _row_html(row, is_red):
-                style = ' style="background-color:#fbdada"' if is_red else ""
-                cells = "".join(f"<td>{v}</td>" for v in row)
-                return f"<tr{style}>{cells}</tr>"
-
-            header_html = "".join(f"<th>{c}</th>" for c in result_r.columns)
-            body_html = "".join(
-                _row_html(row, idx < len(red_flags) and red_flags[idx])
-                for idx, row in enumerate(result_r.itertuples(index=False, name=None))
-            )
-            table_html = f"""
-            <div style="overflow-x:auto;">
-            <table style="width:100%;border-collapse:collapse;font-size:13px;">
-              <thead><tr style="background:#1c3a5e;color:#fff;">{header_html}</tr></thead>
-              <tbody>{body_html}</tbody>
-            </table>
-            </div>
-            <style>
-              table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
-            </style>
-            """
-            st.markdown(table_html, unsafe_allow_html=True)
-            st.download_button(
-                "下載這次查詢結果 CSV",
-                result_r.to_csv(index=False).encode("utf-8-sig"),
-                file_name="歷年累積故障率.csv",
-                mime="text/csv",
-            )
+        if not usage_ready:
+            st.info("這個分頁需要上傳「① 歷年零件耗用資料累積」與「② 販售開始迄今出貨資料」才能查詢，還沒上傳。")
         else:
-            st.dataframe(result_r, use_container_width=True)
-        st.caption(
-            "⚠️ 累積出貨量目前只能抓到「年度」粒度（出貨資料是每年一欄），"
-            "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
-            "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
-        )
+            # 2026/08：預設起訖不再寫死 2021-01，改成抓資料裡實際的最早/最晚故障日，
+            # 避免上傳了更早年份的資料卻因為預設值沒改而被漏算
+            fault_dates = pd.to_datetime(usage_df[ASSUMED_USAGE_COLUMNS["fault_date"]], errors="coerce")
+            default_start_date = fault_dates.min()
+            default_end_date = fault_dates.max()
+            default_start_date = default_start_date.date() if pd.notna(default_start_date) else date.today()
+            default_end_date = default_end_date.date() if pd.notna(default_end_date) else date.today()
+
+            st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                # 一行固定4個框，整齊排版；查找年月改成日曆選擇（只取年月，日期不影響邏輯）
+                r1 = st.columns(4)
+                # 2026/08 修bug：沒指定 min/max 時，Streamlit 會用「這個欄位自己的預設值」
+                # 去推算大約±10年的可選範圍，導致起始欄位（預設2015）選不到2026年。
+                # 改成兩邊都明確用「資料實際最早~最晚日期」當範圍上下限，才不會各自亂猜。
+                start_date_in = r1[0].date_input(
+                    "查找年月（起始）", value=default_start_date,
+                    min_value=default_start_date, max_value=default_end_date, key="u_start_date",
+                )
+                end_date_in = r1[1].date_input(
+                    "查找年月（結束）", value=default_end_date,
+                    min_value=default_start_date, max_value=default_end_date, key="u_end_date",
+                )
+                start_ym = f"{start_date_in.year:04d}-{start_date_in.month:02d}"
+                end_ym = f"{end_date_in.year:04d}-{end_date_in.month:02d}"
+                f_cat = r1[2].multiselect("類別", all_cats, key="u_cat", placeholder="全部（不選＝全部）")
+                f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
+
+                model_scope = model_map_display
+                if f_cat: model_scope = model_scope[model_scope["類別"].isin(f_cat)]
+                if f_io != "全部": model_scope = model_scope[model_scope["內外機"] == f_io]
+                avail_models = [ALL_MODELS_OPTION] + sorted(model_scope["機型"].unique().tolist())
+
+                r2 = st.columns(4)
+                f_model = safe_multiselect("機型", avail_models, key="u_model", container=r2[0])
+                f_part = r2[1].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="u_part",
+                                            placeholder="全部（不選＝全部）")
+                # 2026/08：拿掉「需先選故障部位才能選零件料號」的限制，沒選故障部位時列全部已知料號
+                avail_partno = sorted({c for p in f_part for c in CATEGORY_TO_CODES.get(p, [])}) if f_part \
+                    else sorted(CODE_TO_CATEGORY.keys())
+                avail_partno = [ALL_PARTNO_OPTION] + avail_partno
+                f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno", container=r2[2])
+                f_branch = r2[3].multiselect("維修分公司別", all_branches, key="u_branch", placeholder="全部（不選＝全部）")
+                if ALL_BRANCHES_OPTION in f_branch:
+                    st.caption("📍 已選「所有據點」，結果會直接加總不分公司顯示，其他分公司選擇會被忽略")
+
+                r3 = st.columns(4)
+                f_payment = r3[0].multiselect("有無償", [ALL_PAYMENT_OPTION] + all_payments, key="u_payment",
+                                               placeholder="全部（不選＝全部）")
+                f_county = r3[1].multiselect("縣市別", all_counties, key="u_county", placeholder="全部（不選＝全部）")
+                if ALL_COUNTIES_OPTION in f_county:
+                    st.caption("📍 已選「所有縣市」，結果會直接加總不分縣市顯示，其他縣市選擇會被忽略")
+                f_faultcode = safe_multiselect("故障碼", [ALL_FAULTCODE_OPTION] + all_fault_codes,
+                                                key="u_faultcode", container=r3[2])
+
+                selected_all_labels = [
+                    lbl for cond, lbl in [
+                        (ALL_MODELS_OPTION in f_model, "機型"),
+                        (ALL_FAULTPARTS_OPTION in f_part, "故障部位"),
+                        (ALL_PARTNO_OPTION in f_partno, "零件料號"),
+                        (ALL_PAYMENT_OPTION in f_payment, "有無償"),
+                        (ALL_FAULTCODE_OPTION in f_faultcode, "故障碼"),
+                    ] if cond
+                ]
+                if selected_all_labels:
+                    st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels)}」，"
+                               f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
+
+            result, scope = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
+                                         f_part, f_faultcode, f_partno, f_branch, f_payment, f_county)
+            st.markdown(
+                f'<div class="note-box">📌 當期 = 查找年月（起始 {start_ym} ~ 結束 {end_ym}）；'
+                f'最下面一列「總計」是這次查詢條件下所有列的加總；篩選條件不選任何選項＝該條件不篩選（全部）。</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
+            st.caption(f"共 {max(len(result) - 1, 0)} 筆（不含總計列）")
+            st.dataframe(result, use_container_width=True)
+
+            # 圖表：依維修分公司分組、依有無償堆疊的當期耗用量長條圖
+            chart_data = scope.groupby(["維修分公司", "有無償"], as_index=False)[
+                ASSUMED_USAGE_COLUMNS["qty"]
+            ].sum().rename(columns={ASSUMED_USAGE_COLUMNS["qty"]: "當期耗用量"})
+            if len(chart_data) > 0:
+                st.markdown('<div class="section-title">當期耗用量圖表</div>', unsafe_allow_html=True)
+                try:
+                    import altair as alt
+                    base = alt.Chart(chart_data).encode(
+                        x=alt.X("維修分公司:N", sort="-y", title=None,
+                                axis=alt.Axis(labelAngle=-30, labelFontSize=12, domain=False, ticks=False)),
+                        y=alt.Y("當期耗用量:Q", title="當期耗用量",
+                                axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
+                        color=alt.Color(
+                            "有無償:N",
+                            scale=alt.Scale(range=["#1c3a5e", "#c96f3e", "#4a8f63"]),
+                            legend=alt.Legend(title=None, orient="top", symbolType="circle"),
+                        ),
+                        tooltip=["維修分公司", "有無償", "當期耗用量"],
+                    )
+                    chart = (
+                        base.mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                        .properties(height=380)
+                        .configure_view(strokeWidth=0)
+                        .configure_axis(labelColor="#5a6472", titleColor="#5a6472")
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+                except ImportError:
+                    st.bar_chart(chart_data, x="維修分公司", y="當期耗用量", color="有無償")
+
+        # ---------------- 歷年累積故障率 ----------------
+    with tab_rate:
+        if not usage_ready:
+            st.info("這個分頁需要上傳「① 歷年零件耗用資料累積」與「② 販售開始迄今出貨資料」才能查詢，還沒上傳。")
+        else:
+            st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                # 一行固定4個框，跟零件耗用一覽同款排版
+                r1 = st.columns(4)
+                f_cat_r = r1[0].multiselect("類別", all_cats, key="r_cat", placeholder="全部（不選＝全部）")
+                f_io_r = r1[1].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
+
+                model_scope_r = model_map_display
+                if f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
+                if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
+                avail_models_r = [ALL_MODELS_OPTION] + sorted(model_scope_r["機型"].unique().tolist())
+                f_model_r = safe_multiselect("機型", avail_models_r, key="r_model", container=r1[2])
+
+                f_part_r = r1[3].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="r_part",
+                                              placeholder="全部（不選＝全部）")
+
+                # 動態起點：只選了單一機型（且不是「所有機型」）時，用該機型第一次
+                # 出貨不為0的年度；沒選/選多個/選「所有機型」時，用檔案裡最早的
+                # 年度當通用說明
+                specific_model = f_model_r[0] if len(f_model_r) == 1 and f_model_r[0] != ALL_MODELS_OPTION else None
+                if specific_model:
+                    start_year_for_label = earliest_nonzero_year_for_model(shipment_df, year_cols, specific_model)
+                else:
+                    start_year_for_label = earliest_shipment_year(year_cols)
+                earliest_label = f"{start_year_for_label}/01" if start_year_for_label else "資料最早年月"
+
+                # 2026/08：查找年月改成只能選「年」，不能選月/日；今年這種還沒過完的
+                # 年度，選項文字會自動顯示到最後一個完整月份（依系統當天日期算，逐年適用）
+                year_opts = build_year_options(shipment_df, year_cols, usage_df)
+                year_labels = [lbl for lbl, _ in year_opts]
+                year_end_map = dict(year_opts)
+
+                r2 = st.columns(4)
+                if year_labels:
+                    selected_year_label = r2[0].selectbox(
+                        "查找年月（年度）", year_labels, index=len(year_labels) - 1, key="r_year",
+                    )
+                    end_ym_r = year_end_map[selected_year_label]
+                else:
+                    st.warning("出貨資料裡找不到任何年度欄位，無法選擇查找年月。")
+                    end_ym_r = None
+                f_branch_r = r2[1].multiselect("維修分公司別", all_branches, key="r_branch", placeholder="全部（不選＝全部）")
+                if ALL_BRANCHES_OPTION in f_branch_r:
+                    st.caption("📍 已選「所有據點」，結果會直接加總不分公司顯示，其他分公司選擇會被忽略")
+                # 2026/08：零件料號不再鎖定，隨時可選（沒選故障部位時列全部已知料號）
+                avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) if f_part_r \
+                    else sorted(CODE_TO_CATEGORY.keys())
+                avail_partno_r = [ALL_PARTNO_OPTION] + avail_partno_r
+                f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno", container=r2[2])
+
+                selected_all_labels_r = [
+                    lbl for cond, lbl in [
+                        (ALL_MODELS_OPTION in f_model_r, "機型"),
+                        (ALL_FAULTPARTS_OPTION in f_part_r, "故障部位"),
+                        (ALL_PARTNO_OPTION in f_partno_r, "零件料號"),
+                    ] if cond
+                ]
+                if selected_all_labels_r:
+                    st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels_r)}」，"
+                               f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
+
+            if end_ym_r is not None:
+                st.caption(f"📌 代表 {earliest_label} ～ {selected_year_label}；"
+                           f"去年/前年累積故障率是同一組合往前推1年/2年，一律算到該年12月底。")
+
+            if end_ym_r is None:
+                return
+
+            if specific_model:
+                ship_total = cumulative_shipment(shipment_df, year_cols, specific_model, end_ym_r)
+                st.info(f"📦 {specific_model}（{earliest_label}～{end_ym_r}）出貨數量：{int(ship_total)} 台")
+            elif ALL_MODELS_OPTION in f_model_r:
+                st.info("📦 已選「所有機型」，各列的累積出貨量會依實際涵蓋到的機型分別加總，"
+                        "請看下方表格的「累積故障數量」與故障率換算。")
+            elif len(f_model_r) > 1:
+                # 2026/08：選多個機型時，逐一列出各機型自己的累積出貨量，不再只顯示提示文字
+                lines = []
+                for m in f_model_r[:20]:
+                    m_start = earliest_nonzero_year_for_model(shipment_df, year_cols, m)
+                    m_start_label = f"{m_start}/01" if m_start else "資料最早年月"
+                    m_ship = cumulative_shipment(shipment_df, year_cols, m, end_ym_r)
+                    lines.append(f"　・{m}（{m_start_label}～{end_ym_r}）出貨數量：{int(m_ship)} 台")
+                more_note = f"\n（僅顯示前20個機型，共選了{len(f_model_r)}個）" if len(f_model_r) > 20 else ""
+                st.info("📦 已選多個機型，各機型累積出貨量：\n" + "\n".join(lines) + more_note)
+
+            result_r, red_flags = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
+                                              f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
+            st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
+            st.caption(
+                f"共 {max(len(result_r) - 1, 0)} 筆（不含總計列）；最下面一列為這次查詢條件的總計；"
+                f"紅色列代表該月故障率比去年累積故障率成長超過3成"
+            )
+            if len(result_r) > 0:
+                # 2026/08 修bug：改用 st.dataframe + Styler 在某些 Streamlit/Python
+                # 版本組合下會噴 StreamlitAPIException（Arrow序列化失敗），改成直接
+                # 輸出成 HTML 表格渲染，繞開那條有問題的序列化路徑，比較穩。
+                def _row_html(row, is_red):
+                    style = ' style="background-color:#fbdada"' if is_red else ""
+                    cells = "".join(f"<td>{v}</td>" for v in row)
+                    return f"<tr{style}>{cells}</tr>"
+
+                header_html = "".join(f"<th>{c}</th>" for c in result_r.columns)
+                body_html = "".join(
+                    _row_html(row, idx < len(red_flags) and red_flags[idx])
+                    for idx, row in enumerate(result_r.itertuples(index=False, name=None))
+                )
+                table_html = f"""
+                <div style="overflow-x:auto;">
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                  <thead><tr style="background:#1c3a5e;color:#fff;">{header_html}</tr></thead>
+                  <tbody>{body_html}</tbody>
+                </table>
+                </div>
+                <style>
+                  table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
+                </style>
+                """
+                st.markdown(table_html, unsafe_allow_html=True)
+                st.download_button(
+                    "下載這次查詢結果 CSV",
+                    result_r.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="歷年累積故障率.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.dataframe(result_r, use_container_width=True)
+            st.caption(
+                "⚠️ 累積出貨量目前只能抓到「年度」粒度（出貨資料是每年一欄），"
+                "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
+                "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
+            )
 
 
-    # ---------------- 報修案件查詢 ----------------
+        # ---------------- 報修案件查詢 ----------------
     with tab_case:
         if case_df is None:
             st.info("這個分頁需要另外上傳「③ 報修案件資料」才能查詢，還沒上傳。")
