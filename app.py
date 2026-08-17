@@ -1339,62 +1339,77 @@ def main():
             if ALL_RESP_OPTION not in f_resp_c and f_resp_c:
                 scope_c = scope_c[scope_c["責任歸屬"].isin(f_resp_c)]
 
-            display_cols = [
-                "維修單號", "機型", "類別", "內外機", "報修日期", "完修日期", "縣市別",
-                "出貨經銷商", "報修來源", "報修原因", "故障部位類別", "故障部位名稱",
-                "責任歸屬", "故障狀況",
-            ]
             st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-            st.caption(f"共 {len(scope_c)} 個案件（一個維修單號＝一個案件）")
-            st.dataframe(scope_c[display_cols], use_container_width=True)
-            st.download_button(
-                "下載這次查詢結果 CSV",
-                scope_c[display_cols].to_csv(index=False).encode("utf-8-sig"),
-                file_name="報修案件查詢.csv",
-                mime="text/csv",
-            )
+            # 2026/08 修bug：原本一開啟畫面（連篩選都還沒選）就自動把全部案件
+            # （可能好幾十萬筆）拿去畫表格、算統計、畫圖表，資料一多直接把
+            # Streamlit Cloud 的記憶體吃爆導致當機。改成要按下面這個按鈕才會
+            # 真的去算，畫面一打開不會做任何重工作。
+            run_query = st.button("🔍 開始查詢", key="c_run_query", type="primary")
 
-            # ---- 統計：每年各縣市/責任歸屬/機型案件量 ----
-            st.markdown('<div class="section-title">歷年統計</div>', unsafe_allow_html=True)
-            year_opts_c = build_report_year_options(case_df)
-            year_labels_c = [lbl for lbl, _ in year_opts_c]
-            year_map_c = dict(year_opts_c)
-            if not year_labels_c:
-                st.warning("報修案件資料裡找不到有效的報修年，無法統計。")
+            if not run_query:
+                st.info("設定好上面的篩選條件後，按「開始查詢」才會顯示結果與統計圖表"
+                         "（資料量可能有幾十萬筆，不會一開啟就自動全部算出來）。")
             else:
-                selected_year_label_c = st.selectbox(
-                    "統計基準年度", year_labels_c, index=len(year_labels_c) - 1, key="c_stat_year",
+                display_cols = [
+                    "維修單號", "機型", "類別", "內外機", "報修日期", "完修日期", "縣市別",
+                    "出貨經銷商", "報修來源", "報修原因", "故障部位類別", "故障部位名稱",
+                    "責任歸屬", "故障狀況",
+                ]
+                st.caption(f"共 {len(scope_c)} 個案件（一個維修單號＝一個案件）")
+                PREVIEW_ROWS = 2000
+                if len(scope_c) > PREVIEW_ROWS:
+                    st.caption(f"⚠️ 案件數超過{PREVIEW_ROWS}筆，畫面上只預覽前{PREVIEW_ROWS}筆，"
+                               f"完整資料請用下面的CSV下載")
+                st.dataframe(scope_c[display_cols].head(PREVIEW_ROWS), use_container_width=True)
+                st.download_button(
+                    "下載這次查詢結果 CSV（完整資料，不受畫面預覽筆數限制）",
+                    scope_c[display_cols].to_csv(index=False).encode("utf-8-sig"),
+                    file_name="報修案件查詢.csv",
+                    mime="text/csv",
                 )
-                stat_year = year_map_c[selected_year_label_c]
-                st.caption(f"以下統計都以「{selected_year_label_c}」為基準年，並附上前一年、前兩年的案件量與年增減比例")
 
-                def render_breakdown(title, dim_col, top_n=15):
-                    st.markdown(f"**{title}**")
-                    tbl = case_year_breakdown(case_df, dim_col, stat_year)
-                    st.dataframe(tbl, use_container_width=True)
-                    chart_tbl = tbl.head(top_n)
-                    try:
-                        import altair as alt
-                        chart = (
-                            alt.Chart(chart_tbl)
-                            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-                            .encode(
-                                x=alt.X(f"{dim_col}:N", sort="-y", title=None,
-                                        axis=alt.Axis(labelAngle=-30, labelFontSize=11)),
-                                y=alt.Y(f"{stat_year}年案件量:Q"),
-                                color=alt.value("#1c3a5e"),
-                                tooltip=[dim_col, f"{stat_year}年案件量", f"{stat_year-1}年案件量",
-                                         f"{stat_year-2}年案件量", "年增減比例(vs去年)"],
+                # ---- 統計：每年各縣市/責任歸屬/機型案件量 ----
+                st.markdown('<div class="section-title">歷年統計</div>', unsafe_allow_html=True)
+                year_opts_c = build_report_year_options(case_df)
+                year_labels_c = [lbl for lbl, _ in year_opts_c]
+                year_map_c = dict(year_opts_c)
+                if not year_labels_c:
+                    st.warning("報修案件資料裡找不到有效的報修年，無法統計。")
+                else:
+                    selected_year_label_c = st.selectbox(
+                        "統計基準年度", year_labels_c, index=len(year_labels_c) - 1, key="c_stat_year",
+                    )
+                    stat_year = year_map_c[selected_year_label_c]
+                    st.caption(f"以下統計都以「{selected_year_label_c}」為基準年，並附上前一年、前兩年的案件量與年增減比例"
+                               f"（統計是用「開始查詢」當下的篩選條件範圍去算，不是全部案件）")
+
+                    def render_breakdown(title, dim_col, top_n=15):
+                        st.markdown(f"**{title}**")
+                        tbl = case_year_breakdown(scope_c, dim_col, stat_year)
+                        st.dataframe(tbl, use_container_width=True)
+                        chart_tbl = tbl.head(top_n)
+                        try:
+                            import altair as alt
+                            chart = (
+                                alt.Chart(chart_tbl)
+                                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                                .encode(
+                                    x=alt.X(f"{dim_col}:N", sort="-y", title=None,
+                                            axis=alt.Axis(labelAngle=-30, labelFontSize=11)),
+                                    y=alt.Y(f"{stat_year}年案件量:Q"),
+                                    color=alt.value("#1c3a5e"),
+                                    tooltip=[dim_col, f"{stat_year}年案件量", f"{stat_year-1}年案件量",
+                                             f"{stat_year-2}年案件量", "年增減比例(vs去年)"],
+                                )
+                                .properties(height=320)
                             )
-                            .properties(height=320)
-                        )
-                        st.altair_chart(chart, use_container_width=True)
-                    except ImportError:
-                        st.bar_chart(chart_tbl, x=dim_col, y=f"{stat_year}年案件量")
+                            st.altair_chart(chart, use_container_width=True)
+                        except ImportError:
+                            st.bar_chart(chart_tbl, x=dim_col, y=f"{stat_year}年案件量")
 
-                render_breakdown("① 每年各縣市案件量", "縣市別")
-                render_breakdown("② 每年各責任歸屬案件量", "責任歸屬")
-                render_breakdown("③ 每年各機型案件量", "機型", top_n=20)
+                    render_breakdown("① 每年各縣市案件量", "縣市別")
+                    render_breakdown("② 每年各責任歸屬案件量", "責任歸屬")
+                    render_breakdown("③ 每年各機型案件量", "機型", top_n=20)
 
 
 if __name__ == "__main__":
