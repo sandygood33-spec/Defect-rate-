@@ -351,6 +351,120 @@ def build_shipment_df(shipment_bytes):
 
 
 # ---------------------------------------------------------------------------
+# 業務邏輯：報修案件查詢（2026/08 新增）
+# ---------------------------------------------------------------------------
+# 每年匯出的「報修案件」資料，欄位名稱/順序略有不同（2015 vs 2025 已知差異：
+# 出貨日期欄名前面多一個空格），這裡列出目前已知的別名對照，之後遇到新的
+# 差異，比照這個模式加進去即可。
+CASE_COLUMN_ALIASES = {
+    " 出貨日期": "出貨日期",
+}
+# 這個分頁只需要的欄位（就算原始資料有更多欄位，也只留這些）
+CASE_KEEP_COLS = [
+    "維修單號", "機型", "機號", "報修日期", "完修日期", "出貨日期", "地址",
+    "出貨經銷商", "報修來源", "報修原因", "故障部位類別", "故障部位名稱",
+    "責任歸屬", "故障狀況",
+]
+
+
+def parse_case_date_to_year(series: pd.Series):
+    """報修日期格式可能是 int 或 str 的 YYYYMMDD（例如 20250815），回傳西元年整數。"""
+    s = series.astype(str).str.strip()
+    return pd.to_numeric(s.str.slice(0, 4), errors="coerce")
+
+
+@st.cache_data(show_spinner=False)
+def build_case_df(case_files_bytes: list):
+    """報修案件資料：不是每個案件都有更換零件，所以不能沿用零件耗用資料，
+    要另外上傳、另外處理。同一個維修單號視為同一個案件，只留一列
+    （案件量＝不重複的維修單號數）。"""
+    dfs = []
+    for i, b in enumerate(case_files_bytes, start=1):
+        df = read_any_excel(b)
+        df = df.rename(columns={k: v for k, v in CASE_COLUMN_ALIASES.items() if k in df.columns})
+        df.columns = [str(c).strip() for c in df.columns]
+        missing = [c for c in CASE_KEEP_COLS if c not in df.columns]
+        if missing:
+            st.error(
+                f"「報修案件資料（第{i}個檔案）」缺少欄位：{missing}。"
+                f"目前偵測到的欄位是：{list(df.columns)}。請確認檔案格式，或告訴我正確欄位名稱讓我調整程式。"
+            )
+        dfs.append(df)
+    case_df = pd.concat(dfs, ignore_index=True)
+    case_df = case_df[[c for c in CASE_KEEP_COLS if c in case_df.columns]].copy()
+
+    # 同一個維修單號視為同一個案件，只留一列
+    case_df = case_df.drop_duplicates(subset=["維修單號"], keep="first")
+
+    # 報修年：以報修日期為準
+    case_df["報修年"] = parse_case_date_to_year(case_df["報修日期"])
+
+    # 縣市別：從地址前3碼判斷，正規化規則跟零件耗用一覽的縣市別一致
+    case_df["縣市別"] = normalize_county(case_df["地址"].astype(str).str.slice(0, 3))
+
+    # 機型 -> 類別/內外機，用內建機型分類表；對不到的標「未分類機型」，不會消失
+    case_df["機型"] = case_df["機型"].astype(str).str.strip()
+    model_map = pd.DataFrame(MODEL_RECORDS)
+    model_map["機型"] = model_map["機型"].astype(str).str.strip()
+    model_lookup = model_map.set_index("機型")[["類別", "內外機"]]
+    case_df = case_df.join(model_lookup, on="機型")
+    unmatched_case_models = sorted(
+        case_df.loc[case_df["類別"].isna(), "機型"].dropna().unique().tolist()
+    )
+    case_df["類別"] = case_df["類別"].fillna("未分類機型")
+    case_df["內外機"] = case_df["內外機"].fillna("未分類機型")
+
+    return case_df, unmatched_case_models
+
+
+def build_report_year_options(case_df: pd.DataFrame):
+    """跟故障率頁面的查找年月選單同樣邏輯：今年這種還沒過完的年度，選項文字
+    會標「資料不完整」，避免跟往年整年的數字直接放在一起比較誤導人。"""
+    years = sorted(y for y in case_df["報修年"].dropna().unique().tolist())
+    today = datetime.now()
+    current_year = today.year
+    options = []
+    for y in years:
+        y = int(y)
+        if y == current_year:
+            sub = case_df[case_df["報修年"] == y]
+            max_ym = parse_case_date_to_year(sub["報修日期"])  # already year; get month too
+            months = sub["報修日期"].astype(str).str.slice(4, 6)
+            months = pd.to_numeric(months, errors="coerce").dropna()
+            max_month = int(months.max()) if len(months) else None
+            label = f"{y}（資料只到{max_month:02d}月，尚未完整）" if max_month else f"{y}（資料不完整）"
+        else:
+            label = str(y)
+        options.append((label, y))
+    return options
+
+
+def case_year_breakdown(case_df: pd.DataFrame, dim_col: str, year: int) -> pd.DataFrame:
+    """依 dim_col（縣市別/責任歸屬/機型）統計某一年的案件量，並附上去年/前年
+    案件量與年增減比例（跟去年比）。"""
+    def count_for(y):
+        return case_df[case_df["報修年"] == y][dim_col].value_counts()
+
+    cur, prev, prev2 = count_for(year), count_for(year - 1), count_for(year - 2)
+    all_dims = sorted(set(cur.index) | set(prev.index) | set(prev2.index))
+    rows = []
+    for d in all_dims:
+        c, p, p2 = int(cur.get(d, 0)), int(prev.get(d, 0)), int(prev2.get(d, 0))
+        if p > 0:
+            pct = f"{(c - p) / p:+.1%}"
+        elif c > 0:
+            pct = "N/A（去年為0）"
+        else:
+            pct = "-"
+        rows.append({
+            dim_col: d, f"{year}年案件量": c, f"{year-1}年案件量": p,
+            f"{year-2}年案件量": p2, "年增減比例(vs去年)": pct,
+        })
+    result = pd.DataFrame(rows).sort_values(f"{year}年案件量", ascending=False).reset_index(drop=True)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 業務邏輯：零件耗用一覽
 # ---------------------------------------------------------------------------
 def shift_month(ym: str, months: int) -> str:
@@ -370,6 +484,14 @@ ALL_FAULTPARTS_OPTION = "所有故障部位"
 ALL_PARTNO_OPTION = "所有零件料號"
 ALL_PAYMENT_OPTION = "所有有無償"
 ALL_FAULTCODE_OPTION = "所有故障碼"
+# 2026/08 新增：「報修案件查詢」分頁專用的「所有XXX」選項
+ALL_DEALER_OPTION = "所有經銷商"
+ALL_SOURCE_OPTION = "所有報修來源"
+ALL_REASON_OPTION = "所有報修原因"
+ALL_FAULTCAT_OPTION = "所有故障部位類別"
+ALL_FAULTNAME_OPTION = "所有故障部位名稱"
+ALL_RESP_OPTION = "所有責任歸屬"
+ALL_STATUS_OPTION = "所有故障狀況"
 # 2026/08 新增：縣市別/故障碼，來源欄位在耗用資料裡是選填的（舊版檔案沒有這
 # 兩欄），所以不放進 ASSUMED_USAGE_COLUMNS 的必要欄位清單，缺欄位時退回「未知」。
 COUNTY_SRC_COL = "縣市別"
@@ -390,6 +512,13 @@ COUNTY_ALIASES = {
     "台北市": "臺北市", "台中市": "臺中市", "台南市": "臺南市", "台東縣": "臺東縣",
     "桃園縣": "桃園市",
 }
+
+
+def normalize_county(raw_series: pd.Series) -> pd.Series:
+    """把任意一欄原始縣市/地址字串，正規化成標準23縣市之一，或「資料不明」。
+    共用給零件耗用資料的縣市別欄位、報修案件資料的地址欄位（取前3碼）用。"""
+    s = raw_series.fillna("").astype(str).str.strip().replace(COUNTY_ALIASES)
+    return s.where(s.isin(COUNTY_ORDER), UNKNOWN_COUNTY)
 
 
 def _apply_filter(scope, col, selected):
@@ -786,7 +915,7 @@ def main():
         return
 
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    st.title("零件耗用 / 故障率查詢")
+    st.title("零件耗用 / 故障率查詢 / 報修案件查詢")
 
     with st.expander("📤 上傳資料（每次都請上傳最新檔案）", expanded=True):
         c1, c2 = st.columns(2)
@@ -795,12 +924,18 @@ def main():
                 "① 歷年零件耗用資料累積（可一次選多個檔案，會自動全部合併）",
                 type=["xlsx", "xls"], accept_multiple_files=True,
             )
+            f_case_files = st.file_uploader(
+                "③ 報修案件資料（給「報修案件查詢」分頁用，可一次選多個檔案；"
+                "不影響①②，沒上傳的話前兩個分頁一樣能用）",
+                type=["xlsx", "xls"], accept_multiple_files=True,
+            )
         with c2:
             f_shipment = st.file_uploader("② 販售開始迄今出貨資料", type=["xlsx", "xls"])
 
     if not f_usage_files or not f_shipment:
-        st.info("請上傳以上檔案後才能開始查詢（零件耗用資料可一次選多個檔案）。"
-                 "機型分類、零件分類已經內建在程式裡，不用再上傳。")
+        st.info("請上傳①②檔案後才能開始查詢（零件耗用資料可一次選多個檔案）。"
+                 "機型分類、零件分類已經內建在程式裡，不用再上傳。"
+                 "「報修案件查詢」分頁需要另外上傳③報修案件資料才會顯示內容。")
         return
 
     usage_df, audit_df, model_map, unmatched_models = build_usage_df([f.getvalue() for f in f_usage_files])
@@ -860,7 +995,12 @@ def main():
     else:
         model_map_display = model_map
 
-    tab_usage, tab_rate = st.tabs(["零件耗用一覽", "歷年累積故障率"])
+    # 報修案件資料是選填的，有上傳才處理
+    case_df, case_unmatched_models = (None, [])
+    if f_case_files:
+        case_df, case_unmatched_models = build_case_df([f.getvalue() for f in f_case_files])
+
+    tab_usage, tab_rate, tab_case = st.tabs(["零件耗用一覽", "歷年累積故障率", "報修案件查詢"])
 
     # ---------------- 零件耗用一覽 ----------------
     with tab_usage:
@@ -1106,6 +1246,144 @@ def main():
             "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
             "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
         )
+
+
+    # ---------------- 報修案件查詢 ----------------
+    with tab_case:
+        if case_df is None:
+            st.info("這個分頁需要另外上傳「③ 報修案件資料」才能查詢，還沒上傳。")
+        else:
+            if case_unmatched_models:
+                st.error(
+                    f"🚨 報修案件資料裡有 {len(case_unmatched_models)} 種機型不在內建的「機型分類表」裡"
+                    f"（也可能是原始資料本身機型欄位跑掉，例如誤填成日期），會被歸在「未分類機型」："
+                    f"{'、'.join(case_unmatched_models[:30])}" +
+                    ("...（僅顯示前30個）" if len(case_unmatched_models) > 30 else "")
+                )
+
+            case_all_cats = sort_categories(case_df["類別"].dropna().unique().tolist())
+            case_all_ios = sorted(case_df["內外機"].dropna().unique().tolist())
+            case_all_models = sorted(case_df["機型"].dropna().unique().tolist())
+            case_all_dealers = sorted(case_df["出貨經銷商"].dropna().astype(str).unique().tolist())
+            case_all_sources = sorted(case_df["報修來源"].dropna().astype(str).unique().tolist())
+            case_all_reasons = sorted(case_df["報修原因"].dropna().astype(str).unique().tolist())
+            case_all_faultcats = sorted(case_df["故障部位類別"].dropna().astype(str).unique().tolist())
+            case_all_faultnames = sorted(case_df["故障部位名稱"].dropna().astype(str).unique().tolist())
+            case_all_resps = sorted(case_df["責任歸屬"].dropna().astype(str).unique().tolist())
+            case_all_statuses = sorted(case_df["故障狀況"].dropna().astype(str).unique().tolist())
+            case_all_counties = [ALL_COUNTIES_OPTION] + [
+                c for c in COUNTY_ORDER if c in set(case_df["縣市別"].unique())
+            ] + ([UNKNOWN_COUNTY] if UNKNOWN_COUNTY in case_df["縣市別"].unique() else [])
+
+            st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                r1 = st.columns(4)
+                f_cat_c = r1[0].multiselect("類別", case_all_cats, key="c_cat", placeholder="全部（不選＝全部）")
+                f_io_c = r1[1].selectbox("室內/外機", ["全部"] + case_all_ios, key="c_io")
+                case_model_scope = case_df
+                if f_cat_c: case_model_scope = case_model_scope[case_model_scope["類別"].isin(f_cat_c)]
+                if f_io_c != "全部": case_model_scope = case_model_scope[case_model_scope["內外機"] == f_io_c]
+                avail_case_models = [ALL_MODELS_OPTION] + sorted(case_model_scope["機型"].dropna().unique().tolist())
+                f_model_c = safe_multiselect("機型", avail_case_models, key="c_model", container=r1[2])
+                f_county_c = r1[3].multiselect("縣市別", case_all_counties, key="c_county",
+                                                placeholder="全部（不選＝全部）")
+
+                r2 = st.columns(4)
+                f_dealer_c = r2[0].multiselect("出貨經銷商", [ALL_DEALER_OPTION] + case_all_dealers,
+                                                key="c_dealer", placeholder="全部（不選＝全部）")
+                f_source_c = r2[1].multiselect("報修來源", [ALL_SOURCE_OPTION] + case_all_sources,
+                                                key="c_source", placeholder="全部（不選＝全部）")
+                f_reason_c = r2[2].multiselect("報修原因", [ALL_REASON_OPTION] + case_all_reasons,
+                                                key="c_reason", placeholder="全部（不選＝全部）")
+                f_status_c = r2[3].multiselect("故障狀況", [ALL_STATUS_OPTION] + case_all_statuses,
+                                                key="c_status", placeholder="全部（不選＝全部）")
+
+                r3 = st.columns(4)
+                f_faultcat_c = r3[0].multiselect("故障部位類別", [ALL_FAULTCAT_OPTION] + case_all_faultcats,
+                                                  key="c_faultcat", placeholder="全部（不選＝全部）")
+                f_faultname_c = r3[1].multiselect("故障部位名稱", [ALL_FAULTNAME_OPTION] + case_all_faultnames,
+                                                   key="c_faultname", placeholder="全部（不選＝全部）")
+                f_resp_c = r3[2].multiselect("責任歸屬", [ALL_RESP_OPTION] + case_all_resps,
+                                              key="c_resp", placeholder="全部（不選＝全部）")
+
+            scope_c = case_df
+            if f_cat_c: scope_c = scope_c[scope_c["類別"].isin(f_cat_c)]
+            if f_io_c != "全部": scope_c = scope_c[scope_c["內外機"] == f_io_c]
+            if ALL_MODELS_OPTION not in f_model_c and f_model_c:
+                scope_c = scope_c[scope_c["機型"].isin(f_model_c)]
+            if ALL_COUNTIES_OPTION not in f_county_c and f_county_c:
+                scope_c = scope_c[scope_c["縣市別"].isin(f_county_c)]
+            if ALL_DEALER_OPTION not in f_dealer_c and f_dealer_c:
+                scope_c = scope_c[scope_c["出貨經銷商"].isin(f_dealer_c)]
+            if ALL_SOURCE_OPTION not in f_source_c and f_source_c:
+                scope_c = scope_c[scope_c["報修來源"].isin(f_source_c)]
+            if ALL_REASON_OPTION not in f_reason_c and f_reason_c:
+                scope_c = scope_c[scope_c["報修原因"].isin(f_reason_c)]
+            if ALL_STATUS_OPTION not in f_status_c and f_status_c:
+                scope_c = scope_c[scope_c["故障狀況"].isin(f_status_c)]
+            if ALL_FAULTCAT_OPTION not in f_faultcat_c and f_faultcat_c:
+                scope_c = scope_c[scope_c["故障部位類別"].isin(f_faultcat_c)]
+            if ALL_FAULTNAME_OPTION not in f_faultname_c and f_faultname_c:
+                scope_c = scope_c[scope_c["故障部位名稱"].isin(f_faultname_c)]
+            if ALL_RESP_OPTION not in f_resp_c and f_resp_c:
+                scope_c = scope_c[scope_c["責任歸屬"].isin(f_resp_c)]
+
+            display_cols = [
+                "維修單號", "機型", "類別", "內外機", "報修日期", "完修日期", "縣市別",
+                "出貨經銷商", "報修來源", "報修原因", "故障部位類別", "故障部位名稱",
+                "責任歸屬", "故障狀況",
+            ]
+            st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
+            st.caption(f"共 {len(scope_c)} 個案件（一個維修單號＝一個案件）")
+            st.dataframe(scope_c[display_cols], use_container_width=True)
+            st.download_button(
+                "下載這次查詢結果 CSV",
+                scope_c[display_cols].to_csv(index=False).encode("utf-8-sig"),
+                file_name="報修案件查詢.csv",
+                mime="text/csv",
+            )
+
+            # ---- 統計：每年各縣市/責任歸屬/機型案件量 ----
+            st.markdown('<div class="section-title">歷年統計</div>', unsafe_allow_html=True)
+            year_opts_c = build_report_year_options(case_df)
+            year_labels_c = [lbl for lbl, _ in year_opts_c]
+            year_map_c = dict(year_opts_c)
+            if not year_labels_c:
+                st.warning("報修案件資料裡找不到有效的報修年，無法統計。")
+            else:
+                selected_year_label_c = st.selectbox(
+                    "統計基準年度", year_labels_c, index=len(year_labels_c) - 1, key="c_stat_year",
+                )
+                stat_year = year_map_c[selected_year_label_c]
+                st.caption(f"以下統計都以「{selected_year_label_c}」為基準年，並附上前一年、前兩年的案件量與年增減比例")
+
+                def render_breakdown(title, dim_col, top_n=15):
+                    st.markdown(f"**{title}**")
+                    tbl = case_year_breakdown(case_df, dim_col, stat_year)
+                    st.dataframe(tbl, use_container_width=True)
+                    chart_tbl = tbl.head(top_n)
+                    try:
+                        import altair as alt
+                        chart = (
+                            alt.Chart(chart_tbl)
+                            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                            .encode(
+                                x=alt.X(f"{dim_col}:N", sort="-y", title=None,
+                                        axis=alt.Axis(labelAngle=-30, labelFontSize=11)),
+                                y=alt.Y(f"{stat_year}年案件量:Q"),
+                                color=alt.value("#1c3a5e"),
+                                tooltip=[dim_col, f"{stat_year}年案件量", f"{stat_year-1}年案件量",
+                                         f"{stat_year-2}年案件量", "年增減比例(vs去年)"],
+                            )
+                            .properties(height=320)
+                        )
+                        st.altair_chart(chart, use_container_width=True)
+                    except ImportError:
+                        st.bar_chart(chart_tbl, x=dim_col, y=f"{stat_year}年案件量")
+
+                render_breakdown("① 每年各縣市案件量", "縣市別")
+                render_breakdown("② 每年各責任歸屬案件量", "責任歸屬")
+                render_breakdown("③ 每年各機型案件量", "機型", top_n=20)
 
 
 if __name__ == "__main__":
