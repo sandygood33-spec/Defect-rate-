@@ -648,6 +648,66 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faul
     return result, scope
 
 
+def _is_single_or_collapsed(selected: list, all_opt: str = None) -> bool:
+    """給「歷年耗用比較」用：這個篩選欄位是不是「所有XXX」或最多只選了一個
+    具體項目（沒有同時選好幾個不同的東西，避免好幾個組合的量混在同一條
+    長條圖裡分不清楚）。"""
+    if all_opt and all_opt in selected:
+        return True
+    return len(selected) <= 1
+
+
+def usage_year_comparison(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
+                           f_partno, f_branch, f_payment, f_county):
+    """2026/08 新增：零件耗用一覽的「歷年耗用比較」。用跟上面查詢結果同一套
+    篩選條件，但不受查找年月起訖限制，直接以「年」為單位，把資料裡出現過的
+    每一年都算出來，方便看逐年趨勢。
+    要求：機型/故障部位/零件料號/維修分公司/有無償/縣市別/故障碼/類別，每個
+    欄位都只能是「所有XXX」或最多選一個具體項目，不能同時選好幾個不同的，
+    否則回傳 None，由呼叫端顯示提醒訊息。"""
+    checks = [
+        _is_single_or_collapsed(f_cat),
+        _is_single_or_collapsed(f_model, ALL_MODELS_OPTION),
+        _is_single_or_collapsed(f_part, ALL_FAULTPARTS_OPTION),
+        _is_single_or_collapsed(f_faultcode, ALL_FAULTCODE_OPTION),
+        _is_single_or_collapsed(f_partno, ALL_PARTNO_OPTION),
+        _is_single_or_collapsed(f_branch, ALL_BRANCHES_OPTION),
+        _is_single_or_collapsed(f_payment, ALL_PAYMENT_OPTION),
+        _is_single_or_collapsed(f_county, ALL_COUNTIES_OPTION),
+    ]
+    if not all(checks):
+        return None
+
+    scope = usage_df.copy()
+    scope = _apply_filter(scope, "類別", f_cat)
+    if f_io != "全部": scope = scope[scope["內外機"] == f_io]
+    if ALL_MODELS_OPTION not in f_model: scope = _apply_filter(scope, "機型", f_model)
+    if ALL_FAULTPARTS_OPTION not in f_part: scope = _apply_filter(scope, "故障部位", f_part)
+    if ALL_FAULTCODE_OPTION not in f_faultcode: scope = _apply_filter(scope, "故障碼", f_faultcode)
+    if ALL_PARTNO_OPTION not in f_partno: scope = _apply_filter(scope, "零件料號", f_partno)
+    if ALL_BRANCHES_OPTION not in f_branch: scope = _apply_filter(scope, "維修分公司", f_branch)
+    if ALL_PAYMENT_OPTION not in f_payment: scope = _apply_filter(scope, "有無償", f_payment)
+    if ALL_COUNTIES_OPTION not in f_county: scope = _apply_filter(scope, "縣市別", f_county)
+
+    if scope.empty:
+        return pd.DataFrame(columns=["年度", "當期耗用量", "當期耗用金額", "較去年增減比例"])
+
+    qty_col = ASSUMED_USAGE_COLUMNS["qty"]
+    amt_col = ASSUMED_USAGE_COLUMNS["subtotal"]
+    scope["年度"] = scope["年月"].str.slice(0, 4).astype(int)
+    yearly = scope.groupby("年度", as_index=False)[[qty_col, amt_col]].sum()
+    yearly = yearly.rename(columns={qty_col: "當期耗用量", amt_col: "當期耗用金額"}).sort_values("年度")
+
+    current_year = datetime.now().year
+    yearly["年度標籤"] = yearly["年度"].apply(
+        lambda y: f"{y}（資料不完整）" if y == current_year else str(y)
+    )
+    yearly["較去年增減比例"] = yearly["當期耗用量"].pct_change().apply(
+        lambda v: f"{v:+.1%}" if pd.notna(v) else "-"
+    )
+    return yearly[["年度", "年度標籤", "當期耗用量", "當期耗用金額", "較去年增減比例"]].reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # 業務邏輯：故障率
 # ---------------------------------------------------------------------------
@@ -1178,6 +1238,41 @@ def main():
                         st.altair_chart(chart, use_container_width=True)
                     except ImportError:
                         st.bar_chart(chart_data, x="維修分公司", y="當期耗用量", color="有無償")
+
+                # 2026/08 新增：歷年耗用比較（以年為單位，沿用同一套篩選條件）
+                st.markdown('<div class="section-title">歷年耗用比較</div>', unsafe_allow_html=True)
+                yearly = usage_year_comparison(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
+                                                f_partno, f_branch, f_payment, f_county)
+                if yearly is None:
+                    st.warning("⚠️ 目前篩選條件裡，機型/故障部位/零件料號/維修分公司/有無償/縣市別/故障碼/類別"
+                               "有欄位同時選了好幾個不同的具體項目，無法顯示歷年比較。"
+                               "請把想比較的欄位改選「所有XXX」，或每個欄位最多只選一個具體項目。")
+                elif yearly.empty:
+                    st.info("目前篩選條件下，資料裡沒有符合的紀錄可以比較。")
+                else:
+                    st.caption("以下不受查找年月起訖限制，直接列出資料裡每一個年度")
+                    display_yearly = yearly.rename(columns={"年度標籤": "年度顯示"})[
+                        ["年度顯示", "當期耗用量", "當期耗用金額", "較去年增減比例"]
+                    ].rename(columns={"年度顯示": "年度"})
+                    st.dataframe(display_yearly, use_container_width=True)
+                    try:
+                        import altair as alt
+                        year_chart = (
+                            alt.Chart(yearly)
+                            .mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#1c3a5e")
+                            .encode(
+                                x=alt.X("年度標籤:N", sort=None, title=None,
+                                        axis=alt.Axis(labelAngle=0, labelFontSize=12, domain=False, ticks=False)),
+                                y=alt.Y("當期耗用量:Q", title="當期耗用量",
+                                        axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
+                                tooltip=["年度標籤", "當期耗用量", "當期耗用金額", "較去年增減比例"],
+                            )
+                            .properties(height=340)
+                            .configure_view(strokeWidth=0)
+                        )
+                        st.altair_chart(year_chart, use_container_width=True)
+                    except ImportError:
+                        st.bar_chart(yearly, x="年度標籤", y="當期耗用量")
 
         # ---------------- 歷年累積故障率 ----------------
     with tab_rate:
