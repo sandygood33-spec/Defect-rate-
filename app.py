@@ -1133,46 +1133,51 @@ def main():
                     st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels)}」，"
                                f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
 
-            result, scope = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
-                                         f_part, f_faultcode, f_partno, f_branch, f_payment, f_county)
-            st.markdown(
-                f'<div class="note-box">📌 當期 = 查找年月（起始 {start_ym} ~ 結束 {end_ym}）；'
-                f'最下面一列「總計」是這次查詢條件下所有列的加總；篩選條件不選任何選項＝該條件不篩選（全部）。</div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-            st.caption(f"共 {max(len(result) - 1, 0)} 筆（不含總計列）")
-            st.dataframe(result, use_container_width=True)
+            run_query_u = st.button("🔍 開始查詢", key="u_run_query", type="primary")
 
-            # 圖表：依維修分公司分組、依有無償堆疊的當期耗用量長條圖
-            chart_data = scope.groupby(["維修分公司", "有無償"], as_index=False)[
-                ASSUMED_USAGE_COLUMNS["qty"]
-            ].sum().rename(columns={ASSUMED_USAGE_COLUMNS["qty"]: "當期耗用量"})
-            if len(chart_data) > 0:
-                st.markdown('<div class="section-title">當期耗用量圖表</div>', unsafe_allow_html=True)
-                try:
-                    import altair as alt
-                    base = alt.Chart(chart_data).encode(
-                        x=alt.X("維修分公司:N", sort="-y", title=None,
-                                axis=alt.Axis(labelAngle=-30, labelFontSize=12, domain=False, ticks=False)),
-                        y=alt.Y("當期耗用量:Q", title="當期耗用量",
-                                axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
-                        color=alt.Color(
-                            "有無償:N",
-                            scale=alt.Scale(range=["#1c3a5e", "#c96f3e", "#4a8f63"]),
-                            legend=alt.Legend(title=None, orient="top", symbolType="circle"),
-                        ),
-                        tooltip=["維修分公司", "有無償", "當期耗用量"],
-                    )
-                    chart = (
-                        base.mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-                        .properties(height=380)
-                        .configure_view(strokeWidth=0)
-                        .configure_axis(labelColor="#5a6472", titleColor="#5a6472")
-                    )
-                    st.altair_chart(chart, use_container_width=True)
-                except ImportError:
-                    st.bar_chart(chart_data, x="維修分公司", y="當期耗用量", color="有無償")
+            if not run_query_u:
+                st.info("設定好上面的篩選條件後，按「開始查詢」才會顯示結果與圖表。")
+            else:
+                result, scope = usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model,
+                                             f_part, f_faultcode, f_partno, f_branch, f_payment, f_county)
+                st.markdown(
+                    f'<div class="note-box">📌 當期 = 查找年月（起始 {start_ym} ~ 結束 {end_ym}）；'
+                    f'最下面一列「總計」是這次查詢條件下所有列的加總；篩選條件不選任何選項＝該條件不篩選（全部）。</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
+                st.caption(f"共 {max(len(result) - 1, 0)} 筆（不含總計列）")
+                st.dataframe(result, use_container_width=True)
+
+                # 圖表：依維修分公司分組、依有無償堆疊的當期耗用量長條圖
+                chart_data = scope.groupby(["維修分公司", "有無償"], as_index=False)[
+                    ASSUMED_USAGE_COLUMNS["qty"]
+                ].sum().rename(columns={ASSUMED_USAGE_COLUMNS["qty"]: "當期耗用量"})
+                if len(chart_data) > 0:
+                    st.markdown('<div class="section-title">當期耗用量圖表</div>', unsafe_allow_html=True)
+                    try:
+                        import altair as alt
+                        base = alt.Chart(chart_data).encode(
+                            x=alt.X("維修分公司:N", sort="-y", title=None,
+                                    axis=alt.Axis(labelAngle=-30, labelFontSize=12, domain=False, ticks=False)),
+                            y=alt.Y("當期耗用量:Q", title="當期耗用量",
+                                    axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
+                            color=alt.Color(
+                                "有無償:N",
+                                scale=alt.Scale(range=["#1c3a5e", "#c96f3e", "#4a8f63"]),
+                                legend=alt.Legend(title=None, orient="top", symbolType="circle"),
+                            ),
+                            tooltip=["維修分公司", "有無償", "當期耗用量"],
+                        )
+                        chart = (
+                            base.mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                            .properties(height=380)
+                            .configure_view(strokeWidth=0)
+                            .configure_axis(labelColor="#5a6472", titleColor="#5a6472")
+                        )
+                        st.altair_chart(chart, use_container_width=True)
+                    except ImportError:
+                        st.bar_chart(chart_data, x="維修分公司", y="當期耗用量", color="有無償")
 
         # ---------------- 歷年累積故障率 ----------------
     with tab_rate:
@@ -1247,69 +1252,74 @@ def main():
             if end_ym_r is None:
                 return
 
-            if specific_model:
-                ship_total = cumulative_shipment(shipment_df, year_cols, specific_model, end_ym_r)
-                st.info(f"📦 {specific_model}（{earliest_label}～{end_ym_r}）出貨數量：{int(ship_total)} 台")
-            elif ALL_MODELS_OPTION in f_model_r:
-                st.info("📦 已選「所有機型」，各列的累積出貨量會依實際涵蓋到的機型分別加總，"
-                        "請看下方表格的「累積故障數量」與故障率換算。")
-            elif len(f_model_r) > 1:
-                # 2026/08：選多個機型時，逐一列出各機型自己的累積出貨量，不再只顯示提示文字
-                lines = []
-                for m in f_model_r[:20]:
-                    m_start = earliest_nonzero_year_for_model(shipment_df, year_cols, m)
-                    m_start_label = f"{m_start}/01" if m_start else "資料最早年月"
-                    m_ship = cumulative_shipment(shipment_df, year_cols, m, end_ym_r)
-                    lines.append(f"　・{m}（{m_start_label}～{end_ym_r}）出貨數量：{int(m_ship)} 台")
-                more_note = f"\n（僅顯示前20個機型，共選了{len(f_model_r)}個）" if len(f_model_r) > 20 else ""
-                st.info("📦 已選多個機型，各機型累積出貨量：\n" + "\n".join(lines) + more_note)
+            run_query_r = st.button("🔍 開始查詢", key="r_run_query", type="primary")
 
-            result_r, red_flags = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
-                                              f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
-            st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-            st.caption(
-                f"共 {max(len(result_r) - 1, 0)} 筆（不含總計列）；最下面一列為這次查詢條件的總計；"
-                f"紅色列代表該月故障率比去年累積故障率成長超過3成"
-            )
-            if len(result_r) > 0:
-                # 2026/08 修bug：改用 st.dataframe + Styler 在某些 Streamlit/Python
-                # 版本組合下會噴 StreamlitAPIException（Arrow序列化失敗），改成直接
-                # 輸出成 HTML 表格渲染，繞開那條有問題的序列化路徑，比較穩。
-                def _row_html(row, is_red):
-                    style = ' style="background-color:#fbdada"' if is_red else ""
-                    cells = "".join(f"<td>{v}</td>" for v in row)
-                    return f"<tr{style}>{cells}</tr>"
-
-                header_html = "".join(f"<th>{c}</th>" for c in result_r.columns)
-                body_html = "".join(
-                    _row_html(row, idx < len(red_flags) and red_flags[idx])
-                    for idx, row in enumerate(result_r.itertuples(index=False, name=None))
-                )
-                table_html = f"""
-                <div style="overflow-x:auto;">
-                <table style="width:100%;border-collapse:collapse;font-size:13px;">
-                  <thead><tr style="background:#1c3a5e;color:#fff;">{header_html}</tr></thead>
-                  <tbody>{body_html}</tbody>
-                </table>
-                </div>
-                <style>
-                  table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
-                </style>
-                """
-                st.markdown(table_html, unsafe_allow_html=True)
-                st.download_button(
-                    "下載這次查詢結果 CSV",
-                    result_r.to_csv(index=False).encode("utf-8-sig"),
-                    file_name="歷年累積故障率.csv",
-                    mime="text/csv",
-                )
+            if not run_query_r:
+                st.info("設定好上面的篩選條件後，按「開始查詢」才會顯示結果。")
             else:
-                st.dataframe(result_r, use_container_width=True)
-            st.caption(
-                "⚠️ 累積出貨量目前只能抓到「年度」粒度（出貨資料是每年一欄），"
-                "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
-                "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
-            )
+                if specific_model:
+                    ship_total = cumulative_shipment(shipment_df, year_cols, specific_model, end_ym_r)
+                    st.info(f"📦 {specific_model}（{earliest_label}～{end_ym_r}）出貨數量：{int(ship_total)} 台")
+                elif ALL_MODELS_OPTION in f_model_r:
+                    st.info("📦 已選「所有機型」，各列的累積出貨量會依實際涵蓋到的機型分別加總，"
+                            "請看下方表格的「累積故障數量」與故障率換算。")
+                elif len(f_model_r) > 1:
+                    # 2026/08：選多個機型時，逐一列出各機型自己的累積出貨量，不再只顯示提示文字
+                    lines = []
+                    for m in f_model_r[:20]:
+                        m_start = earliest_nonzero_year_for_model(shipment_df, year_cols, m)
+                        m_start_label = f"{m_start}/01" if m_start else "資料最早年月"
+                        m_ship = cumulative_shipment(shipment_df, year_cols, m, end_ym_r)
+                        lines.append(f"　・{m}（{m_start_label}～{end_ym_r}）出貨數量：{int(m_ship)} 台")
+                    more_note = f"\n（僅顯示前20個機型，共選了{len(f_model_r)}個）" if len(f_model_r) > 20 else ""
+                    st.info("📦 已選多個機型，各機型累積出貨量：\n" + "\n".join(lines) + more_note)
+
+                result_r, red_flags = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
+                                                  f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
+                st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
+                st.caption(
+                    f"共 {max(len(result_r) - 1, 0)} 筆（不含總計列）；最下面一列為這次查詢條件的總計；"
+                    f"紅色列代表該月故障率比去年累積故障率成長超過3成"
+                )
+                if len(result_r) > 0:
+                    # 2026/08 修bug：改用 st.dataframe + Styler 在某些 Streamlit/Python
+                    # 版本組合下會噴 StreamlitAPIException（Arrow序列化失敗），改成直接
+                    # 輸出成 HTML 表格渲染，繞開那條有問題的序列化路徑，比較穩。
+                    def _row_html(row, is_red):
+                        style = ' style="background-color:#fbdada"' if is_red else ""
+                        cells = "".join(f"<td>{v}</td>" for v in row)
+                        return f"<tr{style}>{cells}</tr>"
+
+                    header_html = "".join(f"<th>{c}</th>" for c in result_r.columns)
+                    body_html = "".join(
+                        _row_html(row, idx < len(red_flags) and red_flags[idx])
+                        for idx, row in enumerate(result_r.itertuples(index=False, name=None))
+                    )
+                    table_html = f"""
+                    <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                      <thead><tr style="background:#1c3a5e;color:#fff;">{header_html}</tr></thead>
+                      <tbody>{body_html}</tbody>
+                    </table>
+                    </div>
+                    <style>
+                      table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
+                    </style>
+                    """
+                    st.markdown(table_html, unsafe_allow_html=True)
+                    st.download_button(
+                        "下載這次查詢結果 CSV",
+                        result_r.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="歷年累積故障率.csv",
+                        mime="text/csv",
+                    )
+                else:
+                    st.dataframe(result_r, use_container_width=True)
+                st.caption(
+                    "⚠️ 累積出貨量目前只能抓到「年度」粒度（出貨資料是每年一欄），"
+                    "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
+                    "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
+                )
 
 
         # ---------------- 報修案件查詢 ----------------
