@@ -473,19 +473,23 @@ def build_report_year_options(case_df: pd.DataFrame):
 def case_table(scope_c: pd.DataFrame, dims_config: dict) -> pd.DataFrame:
     """2026/08 新增：報修案件查詢的查詢結果改成跟其他分頁一樣「分組加總」，
     不再逐筆列出維修單號。dims_config 是 {欄位名: (是否收合成所有XXX, 收合後
-    要顯示的文字)}，「類別」「內外機」永遠保留分組（不可收合），其餘欄位
-    只要收合就不分組、直接彙總，最後加一列總計。"""
-    group_cols = ["類別", "內外機"] + [c for c, (all_mode, _) in dims_config.items() if not all_mode]
+    要顯示的文字)}，包含「類別」在內的每個欄位都可以收合；「內外機」永遠
+    保留分組（不可收合，跟其他分頁一致），其餘欄位只要收合就不分組、直接
+    彙總，最後加一列總計。"""
+    group_cols = ["內外機"] + [c for c, (all_mode, _) in dims_config.items() if not all_mode]
     result = scope_c.groupby(group_cols, dropna=False).size().reset_index(name="總案件量")
     for c, (all_mode, all_val) in dims_config.items():
         if all_mode:
             result[c] = all_val
-    ordered_cols = ["類別", "內外機"] + list(dims_config.keys()) + ["總案件量"]
+    ordered_cols = ["內外機"] + list(dims_config.keys()) + ["總案件量"]
+    # 「類別」如果有出現在 dims_config，習慣上放在最前面
+    if "類別" in dims_config:
+        ordered_cols = ["類別"] + [c for c in ordered_cols if c != "類別"]
     result = result[ordered_cols].sort_values("總案件量", ascending=False).reset_index(drop=True)
 
     if len(result) > 0:
         total_row = {c: "" for c in ordered_cols}
-        total_row["類別"] = "總計"
+        total_row[ordered_cols[0]] = "總計"
         total_row["總案件量"] = result["總案件量"].sum()
         result = pd.concat([result, pd.DataFrame([total_row])], ignore_index=True)
     return result
@@ -545,6 +549,7 @@ ALL_FAULTNAME_OPTION = "所有故障部位名稱"
 ALL_RESP_OPTION = "所有責任歸屬"
 ALL_STATUS_OPTION = "所有故障狀況"
 ALL_YEAR_OPTION = "所有報修年"
+ALL_CATEGORY_OPTION = "所有類別"
 # 2026/08 新增：縣市別/故障碼，來源欄位在耗用資料裡是選填的（舊版檔案沒有這
 # 兩欄），所以不放進 ASSUMED_USAGE_COLUMNS 的必要欄位清單，缺欄位時退回「未知」。
 COUNTY_SRC_COL = "縣市別"
@@ -591,7 +596,9 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faul
     太多（「有無償」本來就只是篩選條件、不是分組欄位，所以「所有有無償」
     只需要跳過篩選，不需要額外處理分組）。"""
     scope = usage_df[(usage_df["年月"] >= start_ym) & (usage_df["年月"] <= end_ym)]
-    scope = _apply_filter(scope, "類別", f_cat)
+
+    all_cat_mode = ALL_CATEGORY_OPTION in f_cat
+    if not all_cat_mode: scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
 
     all_models_mode = ALL_MODELS_OPTION in f_model
@@ -610,7 +617,7 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faul
     if not all_payment_mode: scope = _apply_filter(scope, "有無償", f_payment)
     if not all_counties_mode: scope = _apply_filter(scope, "縣市別", f_county)
 
-    group_cols = ["類別", "內外機"] + \
+    group_cols = (["類別"] if not all_cat_mode else []) + ["內外機"] + \
         ([] if all_models_mode else ["機型"]) + \
         ([] if all_parts_mode else ["故障部位"]) + \
         ([] if all_faultcode_mode else ["故障碼"]) + \
@@ -624,6 +631,8 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faul
         .sum()
         .rename(columns={"內外機": "室內/外機", qty_col: "當期耗用量", amt_col: "當期耗用金額"})
     )
+    if all_cat_mode:
+        result["類別"] = ALL_CATEGORY_OPTION
     if all_models_mode:
         result["機型"] = ALL_MODELS_OPTION
     if all_parts_mode:
@@ -666,7 +675,7 @@ def usage_year_comparison(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
     欄位都只能是「所有XXX」或最多選一個具體項目，不能同時選好幾個不同的，
     否則回傳 None，由呼叫端顯示提醒訊息。"""
     checks = [
-        _is_single_or_collapsed(f_cat),
+        _is_single_or_collapsed(f_cat, ALL_CATEGORY_OPTION),
         _is_single_or_collapsed(f_model, ALL_MODELS_OPTION),
         _is_single_or_collapsed(f_part, ALL_FAULTPARTS_OPTION),
         _is_single_or_collapsed(f_faultcode, ALL_FAULTCODE_OPTION),
@@ -679,7 +688,7 @@ def usage_year_comparison(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
         return None
 
     scope = usage_df.copy()
-    scope = _apply_filter(scope, "類別", f_cat)
+    if ALL_CATEGORY_OPTION not in f_cat: scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
     if ALL_MODELS_OPTION not in f_model: scope = _apply_filter(scope, "機型", f_model)
     if ALL_FAULTPARTS_OPTION not in f_part: scope = _apply_filter(scope, "故障部位", f_part)
@@ -776,7 +785,8 @@ def build_year_options(shipment_df, year_cols, usage_df):
 
 def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
     scope = usage_df
-    scope = _apply_filter(scope, "類別", f_cat)
+    if ALL_CATEGORY_OPTION not in f_cat:
+        scope = _apply_filter(scope, "類別", f_cat)
     if f_io != "全部": scope = scope[scope["內外機"] == f_io]
     if ALL_MODELS_OPTION not in f_model:
         scope = _apply_filter(scope, "機型", f_model)
@@ -810,6 +820,7 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
     all_parts_mode = ALL_FAULTPARTS_OPTION in f_part
     all_partno_mode = ALL_PARTNO_OPTION in f_partno
     all_branches_mode = ALL_BRANCHES_OPTION in f_branch
+    all_cat_mode = ALL_CATEGORY_OPTION in f_cat
 
     # 先在「完整細節」(含機型) 的粒度算好每個組合的耗用數量與該機型的出貨量，
     # 之後再依使用者實際想看的欄位重新彙總，這樣才能保證同一機型的出貨量
@@ -849,7 +860,7 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
     combos["_ship_two_years_ago"] = combos["機型"].map(ship_two_years_ago)
 
     # 使用者實際想看的分組欄位（拿掉選了「所有XXX」的那幾個維度）
-    output_group_cols = ["類別", "內外機"] + \
+    output_group_cols = (["類別"] if not all_cat_mode else []) + ["內外機"] + \
         ([] if all_models_mode else ["機型"]) + \
         ([] if all_parts_mode else ["故障部位"]) + \
         ([] if all_partno_mode else ["零件料號"]) + \
@@ -919,6 +930,8 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
         agg["零件料號"] = ALL_PARTNO_OPTION
     if all_branches_mode:
         agg["維修分公司"] = ALL_BRANCHES_OPTION
+    if all_cat_mode:
+        agg["類別"] = ALL_CATEGORY_OPTION
     result = agg[RATE_TABLE_COLS]
 
     if len(result) > 0:
@@ -1083,7 +1096,7 @@ def main():
                 mime="text/csv",
             )
 
-        all_cats = sort_categories(model_map["類別"].dropna().unique().tolist())
+        all_cats = [ALL_CATEGORY_OPTION] + sort_categories(model_map["類別"].dropna().unique().tolist())
         if unmatched_models:
             all_cats = all_cats + ["未分類機型"]
         all_ios = sorted(model_map["內外機"].dropna().unique().tolist())
@@ -1154,7 +1167,7 @@ def main():
                 f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
 
                 model_scope = model_map_display
-                if f_cat: model_scope = model_scope[model_scope["類別"].isin(f_cat)]
+                if f_cat and ALL_CATEGORY_OPTION not in f_cat: model_scope = model_scope[model_scope["類別"].isin(f_cat)]
                 if f_io != "全部": model_scope = model_scope[model_scope["內外機"] == f_io]
                 avail_models = [ALL_MODELS_OPTION] + sorted(model_scope["機型"].unique().tolist())
 
@@ -1287,7 +1300,7 @@ def main():
                 f_io_r = r1[1].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
 
                 model_scope_r = model_map_display
-                if f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
+                if f_cat_r and ALL_CATEGORY_OPTION not in f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
                 if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
                 avail_models_r = [ALL_MODELS_OPTION] + sorted(model_scope_r["機型"].unique().tolist())
                 f_model_r = safe_multiselect("機型", avail_models_r, key="r_model", container=r1[2])
@@ -1430,7 +1443,7 @@ def main():
                     ("...（僅顯示前30個）" if len(case_unmatched_models) > 30 else "")
                 )
 
-            case_all_cats = sort_categories(case_df["類別"].dropna().unique().tolist())
+            case_all_cats = [ALL_CATEGORY_OPTION] + sort_categories(case_df["類別"].dropna().unique().tolist())
             case_all_ios = sorted(case_df["內外機"].dropna().unique().tolist())
             case_all_reasons = sorted(case_df["報修原因"].dropna().astype(str).unique().tolist())
             case_all_faultnames = sorted(case_df["故障部位名稱"].dropna().astype(str).unique().tolist())
@@ -1450,7 +1463,7 @@ def main():
                 f_cat_c = r1[0].multiselect("類別", case_all_cats, key="c_cat", placeholder="全部（不選＝全部）")
                 f_io_c = r1[1].selectbox("室內/外機", ["全部"] + case_all_ios, key="c_io")
                 case_model_scope = case_df
-                if f_cat_c: case_model_scope = case_model_scope[case_model_scope["類別"].isin(f_cat_c)]
+                if f_cat_c and ALL_CATEGORY_OPTION not in f_cat_c: case_model_scope = case_model_scope[case_model_scope["類別"].isin(f_cat_c)]
                 if f_io_c != "全部": case_model_scope = case_model_scope[case_model_scope["內外機"] == f_io_c]
                 avail_case_models = [ALL_MODELS_OPTION] + sorted(case_model_scope["機型"].dropna().unique().tolist())
                 f_model_c = safe_multiselect("機型", avail_case_models, key="c_model", container=r1[2])
@@ -1486,7 +1499,8 @@ def main():
                                               key="c_resp", placeholder="全部（不選＝全部）")
 
             scope_c = case_df
-            if f_cat_c: scope_c = scope_c[scope_c["類別"].isin(f_cat_c)]
+            all_cat_c = ALL_CATEGORY_OPTION in f_cat_c
+            if f_cat_c and not all_cat_c: scope_c = scope_c[scope_c["類別"].isin(f_cat_c)]
             if f_io_c != "全部": scope_c = scope_c[scope_c["內外機"] == f_io_c]
             all_models_c = ALL_MODELS_OPTION in f_model_c
             if not all_models_c and f_model_c:
@@ -1533,6 +1547,7 @@ def main():
                 # 2026/08 大改：查詢結果不再逐筆列出維修單號，改成跟其他分頁
                 # 一樣「分組加總」，選了「所有XXX」的欄位就收合、不分組。
                 dims_config = {
+                    "類別": (all_cat_c, ALL_CATEGORY_OPTION),
                     "機型": (all_models_c, ALL_MODELS_OPTION),
                     "縣市別": (all_counties_c, ALL_COUNTIES_OPTION),
                     "報修年": (all_years_c, ALL_YEAR_OPTION),
