@@ -794,37 +794,40 @@ def usage_year_comparison(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
     return yearly[["年度", "年度標籤", "當期耗用量", "當期耗用金額", "較去年增減比例"]].reset_index(drop=True)
 
 
-def part_monthly_trend(usage_df: pd.DataFrame, model: str, part_no: str, base_ym: str, months_back: int = 6):
-    """2026/08 新增（第二輪改版）：零件耗用趨勢查詢。機型/零件料號都支援
-    「所有XXX」：
-    - 機型選具體的：依「維修分公司」拆欄（不管零件料號有沒有選具體的，
-      選「所有零件料號」就是把該機型底下所有零件加總再依分公司拆）
-    - 機型選「所有機型」、零件料號選具體的：改依「機型」拆欄，方便看這個
-      零件在不同機型上的耗用狀況
-    - 兩個都選「所有」：不拆欄，只給「月份＋總計」，避免欄位爆炸
+def part_monthly_trend(usage_df: pd.DataFrame, models: list, part_nos: list, fault_parts: list,
+                        base_ym: str, months_back: int = 6):
+    """2026/08 新增（第三輪改版）：零件耗用趨勢查詢。機型/零件料號/零件類別
+    （故障部位）都改成多選、都支援「所有XXX」：
+    - 機型選了具體的（一個或多個）：依「維修分公司」拆欄
+    - 機型是「所有機型」，但零件料號或零件類別選了具體的：改依「機型」拆欄，
+      方便看這個零件/類別在不同機型上的耗用狀況
+    - 三個都「所有」：不拆欄，只給「月份＋總計」，避免欄位爆炸
     抓 base_ym 往前推 months_back 個月（含本身，固定 months_back 列）。
-    回傳 (result_df, red_flags, break_values)：red_flags 對應「總計」比
-    上個月成長超過2成的列。"""
+    回傳 (result_df, red_flags, break_values, break_col)：red_flags 對應
+    「總計」比上個月成長超過2成的列。"""
     months = []
     y, m = map(int, base_ym.split("-"))
     for i in range(months_back - 1, -1, -1):
         idx = y * 12 + (m - 1) - i
         months.append(f"{idx // 12:04d}-{idx % 12 + 1:02d}")
 
-    model_specific = model != ALL_MODELS_OPTION
-    part_specific = part_no != ALL_PARTNO_OPTION
+    model_specific = bool(models) and ALL_MODELS_OPTION not in models
+    part_specific = bool(part_nos) and ALL_PARTNO_OPTION not in part_nos
+    faultpart_specific = bool(fault_parts) and ALL_FAULTPARTS_OPTION not in fault_parts
 
     scope = usage_df
     if model_specific:
-        scope = scope[scope["機型"] == model]
+        scope = scope[scope["機型"].isin(models)]
     if part_specific:
-        scope = scope[scope["零件料號"] == part_no]
+        scope = scope[scope["零件料號"].isin(part_nos)]
+    if faultpart_specific:
+        scope = scope[scope["故障部位"].isin(fault_parts)]
 
     qty_col = ASSUMED_USAGE_COLUMNS["qty"]
 
     if model_specific:
         break_col = "維修分公司"
-    elif part_specific:
+    elif part_specific or faultpart_specific:
         break_col = "機型"
     else:
         break_col = None
@@ -1804,17 +1807,21 @@ def main():
         else:
             st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
             with st.container(border=True):
-                r1 = st.columns(3)
+                r1 = st.columns(4)
                 avail_models_t = [ALL_MODELS_OPTION] + sorted(usage_df["機型"].dropna().unique().tolist())
-                t_model = safe_selectbox("機型", avail_models_t, key="t_model", container=r1[0])
-                if t_model != ALL_MODELS_OPTION:
+                t_model = safe_multiselect("機型", avail_models_t, key="t_model", container=r1[0])
+                t_model_specific = bool(t_model) and ALL_MODELS_OPTION not in t_model
+                if t_model_specific:
                     avail_partno_t = sorted(
-                        usage_df.loc[usage_df["機型"] == t_model, "零件料號"].dropna().unique().tolist()
+                        usage_df.loc[usage_df["機型"].isin(t_model), "零件料號"].dropna().unique().tolist()
                     )
                 else:
                     avail_partno_t = sorted(usage_df["零件料號"].dropna().unique().tolist())
-                t_partno = safe_selectbox("零件料號", [ALL_PARTNO_OPTION] + avail_partno_t,
-                                           key="t_partno", container=r1[1])
+                t_partno = safe_multiselect("零件料號", [ALL_PARTNO_OPTION] + avail_partno_t,
+                                             key="t_partno", container=r1[1])
+                # 2026/08 新增：零件類別（故障部位）篩選，跟機型/零件料號一樣多選＋所有XXX
+                t_faultpart = safe_multiselect("零件類別", [ALL_FAULTPARTS_OPTION] + all_parts,
+                                                key="t_faultpart", container=r1[2])
 
                 # 2026/08 修：基準月份只要選「年/月」，不用選到「日」
                 available_yms_t = sorted(usage_df["年月"].dropna().unique().tolist())
@@ -1826,7 +1833,7 @@ def main():
                 default_year_t, default_month_t = map(int, default_ym_t.split("-"))
                 available_years_t = sorted({int(ym.split("-")[0]) for ym in available_yms_t}) or [default_year_t]
 
-                r1b = r1[2].columns(2)
+                r1b = r1[3].columns(2)
                 t_base_year = r1b[0].selectbox(
                     "基準年", available_years_t,
                     index=available_years_t.index(default_year_t), key="t_base_year",
@@ -1836,20 +1843,25 @@ def main():
                 )
                 t_base_ym = f"{t_base_year:04d}-{t_base_month:02d}"
 
-                if t_model == ALL_MODELS_OPTION and t_partno != ALL_PARTNO_OPTION:
-                    st.caption("📍 機型選「所有機型」、零件料號選了具體項目：下面會改依「機型」拆欄")
-                elif t_model == ALL_MODELS_OPTION and t_partno == ALL_PARTNO_OPTION:
-                    st.caption("📍 機型、零件料號都選「所有」：只會顯示總計，不拆欄")
+                t_part_specific = bool(t_partno) and ALL_PARTNO_OPTION not in t_partno
+                t_faultpart_specific = bool(t_faultpart) and ALL_FAULTPARTS_OPTION not in t_faultpart
+                if not t_model_specific and (t_part_specific or t_faultpart_specific):
+                    st.caption("📍 機型選「所有機型」，但零件料號或零件類別選了具體項目：下面會改依「機型」拆欄")
+                elif not t_model_specific and not t_part_specific and not t_faultpart_specific:
+                    st.caption("📍 機型、零件料號、零件類別都選「所有」：只會顯示總計，不拆欄")
 
                 run_query_t = st.button("🔍 查詢", key="t_run_query", type="primary")
 
             if run_query_t:
                 trend_result, trend_flags, trend_break_values, trend_break_col = part_monthly_trend(
-                    usage_df, t_model, t_partno, t_base_ym, months_back=6
+                    usage_df, t_model, t_partno, t_faultpart, t_base_ym, months_back=6
                 )
                 st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-                st.caption(f"{t_model} / 零件料號 {t_partno}，{t_base_ym} 往前推6個月的耗用量；"
-                           "紅色列代表「總計」比上個月成長超過2成")
+                t_model_label = "、".join(t_model) if t_model else ALL_MODELS_OPTION
+                t_partno_label = "、".join(t_partno) if t_partno else ALL_PARTNO_OPTION
+                t_faultpart_label = "、".join(t_faultpart) if t_faultpart else ALL_FAULTPARTS_OPTION
+                st.caption(f"機型：{t_model_label}／零件料號：{t_partno_label}／零件類別：{t_faultpart_label}，"
+                           f"{t_base_ym} 往前推6個月的耗用量；紅色列代表「總計」比上個月成長超過2成")
                 if len(trend_result) > 0:
                     def _row_html_t(row, is_red):
                         style = ' style="background-color:#fbdada"' if is_red else ""
