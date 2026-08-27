@@ -1816,11 +1816,25 @@ def main():
                 t_partno = safe_selectbox("零件料號", [ALL_PARTNO_OPTION] + avail_partno_t,
                                            key="t_partno", container=r1[1])
 
-                fault_dates_t = pd.to_datetime(usage_df[ASSUMED_USAGE_COLUMNS["fault_date"]], errors="coerce")
-                default_base_date = fault_dates_t.max()
-                default_base_date = default_base_date.date() if pd.notna(default_base_date) else date.today()
-                t_base_date = r1[2].date_input("基準月份", value=default_base_date, key="t_base_date")
-                t_base_ym = f"{t_base_date.year:04d}-{t_base_date.month:02d}"
+                # 2026/08 修：基準月份只要選「年/月」，不用選到「日」
+                available_yms_t = sorted(usage_df["年月"].dropna().unique().tolist())
+                if available_yms_t:
+                    default_ym_t = available_yms_t[-1]
+                else:
+                    today_t = date.today()
+                    default_ym_t = f"{today_t.year:04d}-{today_t.month:02d}"
+                default_year_t, default_month_t = map(int, default_ym_t.split("-"))
+                available_years_t = sorted({int(ym.split("-")[0]) for ym in available_yms_t}) or [default_year_t]
+
+                r1b = r1[2].columns(2)
+                t_base_year = r1b[0].selectbox(
+                    "基準年", available_years_t,
+                    index=available_years_t.index(default_year_t), key="t_base_year",
+                )
+                t_base_month = r1b[1].selectbox(
+                    "基準月", list(range(1, 13)), index=default_month_t - 1, key="t_base_month",
+                )
+                t_base_ym = f"{t_base_year:04d}-{t_base_month:02d}"
 
                 if t_model == ALL_MODELS_OPTION and t_partno != ALL_PARTNO_OPTION:
                     st.caption("📍 機型選「所有機型」、零件料號選了具體項目：下面會改依「機型」拆欄")
