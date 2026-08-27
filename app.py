@@ -794,6 +794,42 @@ def usage_year_comparison(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
     return yearly[["年度", "年度標籤", "當期耗用量", "當期耗用金額", "較去年增減比例"]].reset_index(drop=True)
 
 
+def part_monthly_trend(usage_df: pd.DataFrame, model: str, part_no: str, base_ym: str, months_back: int = 6):
+    """2026/08 新增：零件耗用趨勢查詢。給「某一個機型 + 某一個零件料號」，
+    抓 base_ym 往前推 months_back 個月（含 base_ym 本身，共 months_back 列）
+    的月耗用量，橫向展開成「月份、各分公司、總計」，不會因為分公司多就
+    列數暴增。回傳 (result_df, red_flags)：red_flags 對應「總計」比上個月
+    成長超過2成的列。"""
+    months = []
+    y, m = map(int, base_ym.split("-"))
+    for i in range(months_back - 1, -1, -1):
+        idx = y * 12 + (m - 1) - i
+        months.append(f"{idx // 12:04d}-{idx % 12 + 1:02d}")
+
+    scope = usage_df[(usage_df["機型"] == model) & (usage_df["零件料號"] == part_no)]
+    qty_col = ASSUMED_USAGE_COLUMNS["qty"]
+
+    branches = sorted(scope["維修分公司"].dropna().unique().tolist()) if not scope.empty else []
+    rows = []
+    for ym in months:
+        sub = scope[scope["年月"] == ym]
+        row = {"月份": ym}
+        for b in branches:
+            row[b] = int(sub[sub["維修分公司"] == b][qty_col].sum())
+        row["總計"] = int(sub[qty_col].sum())
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    totals = result["總計"].tolist()
+    red_flags = []
+    for i, t in enumerate(totals):
+        if i == 0 or totals[i - 1] <= 0:
+            red_flags.append(False)
+        else:
+            red_flags.append((t - totals[i - 1]) / totals[i - 1] > 0.2)
+    return result, red_flags, branches
+
+
 # ---------------------------------------------------------------------------
 # 業務邏輯：故障率
 # ---------------------------------------------------------------------------
@@ -1135,19 +1171,22 @@ def main():
         with c2:
             f_shipment = st.file_uploader("② 販售開始迄今出貨資料", type=["xlsx", "xls"])
 
+    usage_data_ready = bool(f_usage_files)
     usage_ready = bool(f_usage_files and f_shipment)
 
-    if not usage_ready and not f_case_files:
+    if not usage_ready and not f_case_files and not usage_data_ready:
         st.info("「機型機號問題查詢」分頁不用上傳任何檔案就能直接用。"
                  "如果想用「零件耗用一覽」「歷年累積故障率」，請上傳①②檔案；"
-                 "想用「報修案件查詢」，請上傳③檔案，兩組互相獨立。"
+                 "想用「報修案件查詢」，請上傳③檔案；"
+                 "想用「零件耗用趨勢查詢」，只需要上傳①檔案。四組互相獨立。"
                  "機型分類、零件分類、品質問題對應機型機號都已經內建在程式裡，不用上傳。")
 
-    if usage_ready:
+    if usage_data_ready:
         usage_df, audit_df, model_map, unmatched_models = build_usage_df(
             [f.getvalue() for f in f_usage_files]
         )
-        shipment_df, year_cols = build_shipment_df(f_shipment.getvalue())
+        if usage_ready:
+            shipment_df, year_cols = build_shipment_df(f_shipment.getvalue())
 
         if unmatched_models:
             st.error(
@@ -1211,8 +1250,8 @@ def main():
     # 品質問題對應機型機號已經內嵌在程式碼裡，不用上傳，一律處理
     quality_df, quality_bad_rows = build_quality_issue_df()
 
-    tab_usage, tab_rate, tab_case, tab_quality = st.tabs(
-        ["零件耗用一覽", "歷年累積故障率", "報修案件查詢", "機型機號問題查詢"]
+    tab_usage, tab_rate, tab_case, tab_quality, tab_trend = st.tabs(
+        ["零件耗用一覽", "歷年累積故障率", "報修案件查詢", "機型機號問題查詢", "零件耗用趨勢查詢"]
     )
 
     # ---------------- 零件耗用一覽 ----------------
@@ -1736,6 +1775,87 @@ def main():
 
         with st.expander("📋 查看完整品質問題清單"):
             st.dataframe(quality_df[["問題", "機型", "開始機號", "結束機號"]], use_container_width=True)
+
+    # ---------------- 零件耗用趨勢查詢 ----------------
+    with tab_trend:
+        if not usage_data_ready:
+            st.info("這個分頁只需要上傳「① 歷年零件耗用資料累積」就能用，不用②③④，還沒上傳。")
+        else:
+            st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                r1 = st.columns(3)
+                t_model = r1[0].selectbox("機型", ["-"] + sorted(usage_df["機型"].dropna().unique().tolist()),
+                                           key="t_model")
+                if t_model != "-":
+                    avail_partno_t = sorted(
+                        usage_df.loc[usage_df["機型"] == t_model, "零件料號"].dropna().unique().tolist()
+                    )
+                else:
+                    avail_partno_t = []
+                t_partno = r1[1].selectbox("零件料號", ["-"] + avail_partno_t, key="t_partno")
+
+                fault_dates_t = pd.to_datetime(usage_df[ASSUMED_USAGE_COLUMNS["fault_date"]], errors="coerce")
+                default_base_date = fault_dates_t.max()
+                default_base_date = default_base_date.date() if pd.notna(default_base_date) else date.today()
+                t_base_date = r1[2].date_input("基準月份", value=default_base_date, key="t_base_date")
+                t_base_ym = f"{t_base_date.year:04d}-{t_base_date.month:02d}"
+
+                run_query_t = st.button("🔍 查詢", key="t_run_query", type="primary")
+
+            if run_query_t:
+                if t_model == "-" or t_partno == "-":
+                    st.warning("請選機型、並選零件料號後再查詢。")
+                else:
+                    trend_result, trend_flags, trend_branches = part_monthly_trend(
+                        usage_df, t_model, t_partno, t_base_ym, months_back=6
+                    )
+                    st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
+                    st.caption(f"{t_model} / 零件料號 {t_partno}，{t_base_ym} 往前推6個月的耗用量；"
+                               "紅色列代表「總計」比上個月成長超過2成")
+                    if len(trend_result) > 0:
+                        def _row_html_t(row, is_red):
+                            style = ' style="background-color:#fbdada"' if is_red else ""
+                            cells = "".join(f"<td>{v}</td>" for v in row)
+                            return f"<tr{style}>{cells}</tr>"
+
+                        header_html_t = "".join(f"<th>{c}</th>" for c in trend_result.columns)
+                        body_html_t = "".join(
+                            _row_html_t(row, trend_flags[idx])
+                            for idx, row in enumerate(trend_result.itertuples(index=False, name=None))
+                        )
+                        table_html_t = f"""
+                        <div style="overflow-x:auto;">
+                        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                          <thead><tr style="background:#1c3a5e;color:#fff;">{header_html_t}</tr></thead>
+                          <tbody>{body_html_t}</tbody>
+                        </table>
+                        </div>
+                        <style>
+                          table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
+                        </style>
+                        """
+                        st.markdown(table_html_t, unsafe_allow_html=True)
+
+                        try:
+                            import altair as alt
+                            chart_t = (
+                                alt.Chart(trend_result)
+                                .mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#1c3a5e")
+                                .encode(
+                                    x=alt.X("月份:N", sort=None, title=None,
+                                            axis=alt.Axis(labelAngle=0, labelFontSize=12, domain=False, ticks=False)),
+                                    y=alt.Y("總計:Q", title="耗用量",
+                                            axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
+                                    tooltip=["月份", "總計"] + trend_branches,
+                                )
+                                .properties(height=320)
+                                .configure_view(strokeWidth=0)
+                            )
+                            st.altair_chart(chart_t, use_container_width=True)
+                        except ImportError:
+                            st.bar_chart(trend_result, x="月份", y="總計")
+                    else:
+                        st.info("查無資料。")
 
 
 if __name__ == "__main__":
