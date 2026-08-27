@@ -795,27 +795,47 @@ def usage_year_comparison(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
 
 
 def part_monthly_trend(usage_df: pd.DataFrame, model: str, part_no: str, base_ym: str, months_back: int = 6):
-    """2026/08 新增：零件耗用趨勢查詢。給「某一個機型 + 某一個零件料號」，
-    抓 base_ym 往前推 months_back 個月（含 base_ym 本身，共 months_back 列）
-    的月耗用量，橫向展開成「月份、各分公司、總計」，不會因為分公司多就
-    列數暴增。回傳 (result_df, red_flags)：red_flags 對應「總計」比上個月
-    成長超過2成的列。"""
+    """2026/08 新增（第二輪改版）：零件耗用趨勢查詢。機型/零件料號都支援
+    「所有XXX」：
+    - 機型選具體的：依「維修分公司」拆欄（不管零件料號有沒有選具體的，
+      選「所有零件料號」就是把該機型底下所有零件加總再依分公司拆）
+    - 機型選「所有機型」、零件料號選具體的：改依「機型」拆欄，方便看這個
+      零件在不同機型上的耗用狀況
+    - 兩個都選「所有」：不拆欄，只給「月份＋總計」，避免欄位爆炸
+    抓 base_ym 往前推 months_back 個月（含本身，固定 months_back 列）。
+    回傳 (result_df, red_flags, break_values)：red_flags 對應「總計」比
+    上個月成長超過2成的列。"""
     months = []
     y, m = map(int, base_ym.split("-"))
     for i in range(months_back - 1, -1, -1):
         idx = y * 12 + (m - 1) - i
         months.append(f"{idx // 12:04d}-{idx % 12 + 1:02d}")
 
-    scope = usage_df[(usage_df["機型"] == model) & (usage_df["零件料號"] == part_no)]
+    model_specific = model != ALL_MODELS_OPTION
+    part_specific = part_no != ALL_PARTNO_OPTION
+
+    scope = usage_df
+    if model_specific:
+        scope = scope[scope["機型"] == model]
+    if part_specific:
+        scope = scope[scope["零件料號"] == part_no]
+
     qty_col = ASSUMED_USAGE_COLUMNS["qty"]
 
-    branches = sorted(scope["維修分公司"].dropna().unique().tolist()) if not scope.empty else []
+    if model_specific:
+        break_col = "維修分公司"
+    elif part_specific:
+        break_col = "機型"
+    else:
+        break_col = None
+
+    break_values = sorted(scope[break_col].dropna().unique().tolist()) if break_col and not scope.empty else []
     rows = []
     for ym in months:
         sub = scope[scope["年月"] == ym]
         row = {"月份": ym}
-        for b in branches:
-            row[b] = int(sub[sub["維修分公司"] == b][qty_col].sum())
+        for v in break_values:
+            row[v] = int(sub[sub[break_col] == v][qty_col].sum())
         row["總計"] = int(sub[qty_col].sum())
         rows.append(row)
 
@@ -827,7 +847,7 @@ def part_monthly_trend(usage_df: pd.DataFrame, model: str, part_no: str, base_ym
             red_flags.append(False)
         else:
             red_flags.append((t - totals[i - 1]) / totals[i - 1] > 0.2)
-    return result, red_flags, branches
+    return result, red_flags, break_values, break_col
 
 
 # ---------------------------------------------------------------------------
@@ -1079,7 +1099,7 @@ def cascading_select(label, options, key, disabled=False):
     return st.selectbox(label, opts, key=key, disabled=disabled)
 
 
-def safe_selectbox(label, options, key, disabled=False, **kwargs):
+def safe_selectbox(label, options, key, disabled=False, container=None, **kwargs):
     """2026/08 修 bug：上游條件（類別/內外機）改變時，下游選單（機型/零件料號）
     的選項列表也會跟著變，但 Streamlit 的 selectbox 若沿用同一個 key，殘留的
     舊選擇值可能不在新的選項列表裡（例如原本選「室內機」+「RHF25RVLT」，
@@ -1088,7 +1108,8 @@ def safe_selectbox(label, options, key, disabled=False, **kwargs):
     不在的話強制重置成「全部」，避免出現不可能存在的組合。"""
     if key in st.session_state and st.session_state[key] not in options:
         st.session_state[key] = "全部" if "全部" in options else (options[0] if options else "")
-    return st.selectbox(label, options, key=key, disabled=disabled, **kwargs)
+    target = container if container is not None else st
+    return target.selectbox(label, options, key=key, disabled=disabled, **kwargs)
 
 
 def safe_multiselect(label, options, key, disabled=False, container=None, **kwargs):
@@ -1784,15 +1805,16 @@ def main():
             st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
             with st.container(border=True):
                 r1 = st.columns(3)
-                t_model = r1[0].selectbox("機型", ["-"] + sorted(usage_df["機型"].dropna().unique().tolist()),
-                                           key="t_model")
-                if t_model != "-":
+                avail_models_t = [ALL_MODELS_OPTION] + sorted(usage_df["機型"].dropna().unique().tolist())
+                t_model = safe_selectbox("機型", avail_models_t, key="t_model", container=r1[0])
+                if t_model != ALL_MODELS_OPTION:
                     avail_partno_t = sorted(
                         usage_df.loc[usage_df["機型"] == t_model, "零件料號"].dropna().unique().tolist()
                     )
                 else:
-                    avail_partno_t = []
-                t_partno = r1[1].selectbox("零件料號", ["-"] + avail_partno_t, key="t_partno")
+                    avail_partno_t = sorted(usage_df["零件料號"].dropna().unique().tolist())
+                t_partno = safe_selectbox("零件料號", [ALL_PARTNO_OPTION] + avail_partno_t,
+                                           key="t_partno", container=r1[1])
 
                 fault_dates_t = pd.to_datetime(usage_df[ASSUMED_USAGE_COLUMNS["fault_date"]], errors="coerce")
                 default_base_date = fault_dates_t.max()
@@ -1800,62 +1822,64 @@ def main():
                 t_base_date = r1[2].date_input("基準月份", value=default_base_date, key="t_base_date")
                 t_base_ym = f"{t_base_date.year:04d}-{t_base_date.month:02d}"
 
+                if t_model == ALL_MODELS_OPTION and t_partno != ALL_PARTNO_OPTION:
+                    st.caption("📍 機型選「所有機型」、零件料號選了具體項目：下面會改依「機型」拆欄")
+                elif t_model == ALL_MODELS_OPTION and t_partno == ALL_PARTNO_OPTION:
+                    st.caption("📍 機型、零件料號都選「所有」：只會顯示總計，不拆欄")
+
                 run_query_t = st.button("🔍 查詢", key="t_run_query", type="primary")
 
             if run_query_t:
-                if t_model == "-" or t_partno == "-":
-                    st.warning("請選機型、並選零件料號後再查詢。")
-                else:
-                    trend_result, trend_flags, trend_branches = part_monthly_trend(
-                        usage_df, t_model, t_partno, t_base_ym, months_back=6
+                trend_result, trend_flags, trend_break_values, trend_break_col = part_monthly_trend(
+                    usage_df, t_model, t_partno, t_base_ym, months_back=6
+                )
+                st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
+                st.caption(f"{t_model} / 零件料號 {t_partno}，{t_base_ym} 往前推6個月的耗用量；"
+                           "紅色列代表「總計」比上個月成長超過2成")
+                if len(trend_result) > 0:
+                    def _row_html_t(row, is_red):
+                        style = ' style="background-color:#fbdada"' if is_red else ""
+                        cells = "".join(f"<td>{v}</td>" for v in row)
+                        return f"<tr{style}>{cells}</tr>"
+
+                    header_html_t = "".join(f"<th>{c}</th>" for c in trend_result.columns)
+                    body_html_t = "".join(
+                        _row_html_t(row, trend_flags[idx])
+                        for idx, row in enumerate(trend_result.itertuples(index=False, name=None))
                     )
-                    st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
-                    st.caption(f"{t_model} / 零件料號 {t_partno}，{t_base_ym} 往前推6個月的耗用量；"
-                               "紅色列代表「總計」比上個月成長超過2成")
-                    if len(trend_result) > 0:
-                        def _row_html_t(row, is_red):
-                            style = ' style="background-color:#fbdada"' if is_red else ""
-                            cells = "".join(f"<td>{v}</td>" for v in row)
-                            return f"<tr{style}>{cells}</tr>"
+                    table_html_t = f"""
+                    <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                      <thead><tr style="background:#1c3a5e;color:#fff;">{header_html_t}</tr></thead>
+                      <tbody>{body_html_t}</tbody>
+                    </table>
+                    </div>
+                    <style>
+                      table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
+                    </style>
+                    """
+                    st.markdown(table_html_t, unsafe_allow_html=True)
 
-                        header_html_t = "".join(f"<th>{c}</th>" for c in trend_result.columns)
-                        body_html_t = "".join(
-                            _row_html_t(row, trend_flags[idx])
-                            for idx, row in enumerate(trend_result.itertuples(index=False, name=None))
-                        )
-                        table_html_t = f"""
-                        <div style="overflow-x:auto;">
-                        <table style="width:100%;border-collapse:collapse;font-size:13px;">
-                          <thead><tr style="background:#1c3a5e;color:#fff;">{header_html_t}</tr></thead>
-                          <tbody>{body_html_t}</tbody>
-                        </table>
-                        </div>
-                        <style>
-                          table td, table th {{ padding:6px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }}
-                        </style>
-                        """
-                        st.markdown(table_html_t, unsafe_allow_html=True)
-
-                        try:
-                            import altair as alt
-                            chart_t = (
-                                alt.Chart(trend_result)
-                                .mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#1c3a5e")
-                                .encode(
-                                    x=alt.X("月份:N", sort=None, title=None,
-                                            axis=alt.Axis(labelAngle=0, labelFontSize=12, domain=False, ticks=False)),
-                                    y=alt.Y("總計:Q", title="耗用量",
-                                            axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
-                                    tooltip=["月份", "總計"] + trend_branches,
-                                )
-                                .properties(height=320)
-                                .configure_view(strokeWidth=0)
+                    try:
+                        import altair as alt
+                        chart_t = (
+                            alt.Chart(trend_result)
+                            .mark_bar(size=34, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#1c3a5e")
+                            .encode(
+                                x=alt.X("月份:N", sort=None, title=None,
+                                        axis=alt.Axis(labelAngle=0, labelFontSize=12, domain=False, ticks=False)),
+                                y=alt.Y("總計:Q", title="耗用量",
+                                        axis=alt.Axis(gridColor="#eef1f5", domain=False, ticks=False)),
+                                tooltip=["月份", "總計"] + trend_break_values,
                             )
-                            st.altair_chart(chart_t, use_container_width=True)
-                        except ImportError:
-                            st.bar_chart(trend_result, x="月份", y="總計")
-                    else:
-                        st.info("查無資料。")
+                            .properties(height=320)
+                            .configure_view(strokeWidth=0)
+                        )
+                        st.altair_chart(chart_t, use_container_width=True)
+                    except ImportError:
+                        st.bar_chart(trend_result, x="月份", y="總計")
+                else:
+                    st.info("查無資料。")
 
 
 if __name__ == "__main__":
