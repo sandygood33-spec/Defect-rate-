@@ -935,14 +935,28 @@ def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
     return scope
 
 
+def _monthly_breakdown(scope, break_col, months, qty_col):
+    """共用小工具：把 scope 依 break_col 橫向拆欄，逐月加總。"""
+    values_present = sorted(scope[break_col].dropna().unique().tolist()) if not scope.empty else []
+    rows = []
+    for ym in months:
+        sub = scope[scope["年月"] == ym]
+        row = {"月份": ym}
+        for v in values_present:
+            row[v] = int(sub[sub[break_col] == v][qty_col].sum())
+        row["總計"] = int(sub[qty_col].sum())
+        rows.append(row)
+    return pd.DataFrame(rows), values_present
+
+
 def rate_monthly_case_count(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch, months_back: int = 12):
-    """2026/08 第二輪改版：歷年累積故障率頁面的「每月故障案件量」匯出。
+    """2026/08 第三輪改版：歷年累積故障率頁面的「每月故障案件量」匯出。
     - 沿用這個分頁目前選的篩選條件（類別/機型/故障部位/零件料號/維修分公司），
       但不是累積數字，是每一個月「單月」的故障數量
     - 只列「系統當天日期」往前推 months_back 個月（預設12個月，含當月），
       不會把好幾年的月份全部列出來
-    - 依「故障部位」橫向拆欄，不是單一籠統總數（欄位數取決於篩選範圍內
-      實際出現過幾種故障部位，通常不會太多）
+    - 回傳兩張表：依「故障部位」拆欄、依「有無償」拆欄，各自橫向展開，
+      不會合在一起變成故障部位×有無償的超多欄位組合
     """
     scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch)
     qty_col = ASSUMED_USAGE_COLUMNS["qty"]
@@ -953,18 +967,9 @@ def rate_monthly_case_count(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_
         idx = today.year * 12 + (today.month - 1) - i
         months.append(f"{idx // 12:04d}-{idx % 12 + 1:02d}")
 
-    fault_parts_present = sorted(scope["故障部位"].dropna().unique().tolist()) if not scope.empty else []
-    rows = []
-    for ym in months:
-        sub = scope[scope["年月"] == ym]
-        row = {"月份": ym}
-        for fp in fault_parts_present:
-            row[fp] = int(sub[sub["故障部位"] == fp][qty_col].sum())
-        row["總計"] = int(sub[qty_col].sum())
-        rows.append(row)
-
-    monthly = pd.DataFrame(rows)
-    return monthly, fault_parts_present
+    monthly_by_faultpart, fault_parts_present = _monthly_breakdown(scope, "故障部位", months, qty_col)
+    monthly_by_payment, payment_present = _monthly_breakdown(scope, "有無償", months, qty_col)
+    return monthly_by_faultpart, fault_parts_present, monthly_by_payment, payment_present
 
 
 def rate_table(usage_df, shipment_df, year_cols, end_ym,
@@ -1606,40 +1611,53 @@ def main():
                     "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
                 )
 
-                # 2026/08 第二輪：每月故障案件量匯出（限制近12個月＋依故障部位拆欄）
+                # 2026/08 第三輪：每月故障案件量匯出（限制近12個月＋依故障部位/有無償各拆一張表）
                 st.markdown('<div class="section-title">每月故障案件量</div>', unsafe_allow_html=True)
                 st.caption("沿用上面選的篩選條件，但不是累積數字，是每個月「單月」的故障數量；"
-                           "只列系統當天日期往前推12個月；依故障部位橫向拆欄，最後一欄是當月總計")
-                monthly_case, monthly_fault_parts = rate_monthly_case_count(
+                           "只列系統當天日期往前推12個月")
+                (monthly_by_faultpart, monthly_fault_parts,
+                 monthly_by_payment, monthly_payments) = rate_monthly_case_count(
                     usage_df, f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r, months_back=12
                 )
-                if len(monthly_case) > 0:
-                    st.dataframe(monthly_case, use_container_width=True)
+
+                def _render_monthly_breakdown(title, df_m, break_values, csv_name, chart_key):
+                    st.markdown(f"**{title}**")
+                    if len(df_m) == 0:
+                        st.info("目前篩選條件下查無資料。")
+                        return
+                    st.dataframe(df_m, use_container_width=True)
                     st.download_button(
-                        "下載每月故障案件量 CSV",
-                        monthly_case.to_csv(index=False).encode("utf-8-sig"),
-                        file_name="每月故障案件量.csv",
+                        f"下載{title} CSV",
+                        df_m.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=csv_name,
                         mime="text/csv",
-                        key="monthly_case_download",
+                        key=chart_key + "_download",
                     )
                     try:
                         import altair as alt
-                        monthly_chart = (
-                            alt.Chart(monthly_case)
+                        chart_m = (
+                            alt.Chart(df_m)
                             .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#1c3a5e")
                             .encode(
                                 x=alt.X("月份:N", sort=None, title=None,
                                         axis=alt.Axis(labelAngle=-45, labelFontSize=10)),
                                 y=alt.Y("總計:Q"),
-                                tooltip=["月份", "總計"] + monthly_fault_parts,
+                                tooltip=["月份", "總計"] + break_values,
                             )
                             .properties(height=300)
                         )
-                        st.altair_chart(monthly_chart, use_container_width=True)
+                        st.altair_chart(chart_m, use_container_width=True)
                     except ImportError:
-                        st.bar_chart(monthly_case, x="月份", y="總計")
-                else:
-                    st.info("目前篩選條件下查無資料。")
+                        st.bar_chart(df_m, x="月份", y="總計")
+
+                _render_monthly_breakdown(
+                    "依故障部位拆欄", monthly_by_faultpart, monthly_fault_parts,
+                    "每月故障案件量_依故障部位.csv", "monthly_faultpart",
+                )
+                _render_monthly_breakdown(
+                    "依有無償拆欄", monthly_by_payment, monthly_payments,
+                    "每月故障案件量_依有無償.csv", "monthly_payment",
+                )
 
 
         # ---------------- 報修案件查詢 ----------------
