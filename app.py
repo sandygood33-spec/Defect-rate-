@@ -1396,7 +1396,10 @@ def main():
                     st.caption(f"📍 已選「所有{'」「所有'.join(selected_all_labels)}」，"
                                f"結果不會再依這些欄位分組，其他已選的細項會被忽略")
 
-            run_query_u = st.button("🔍 開始查詢", key="u_run_query", type="primary")
+            run_query_u_clicked = st.button("🔍 開始查詢", key="u_run_query", type="primary")
+            if run_query_u_clicked:
+                st.session_state["u_query_done"] = True
+            run_query_u = st.session_state.get("u_query_done", False)
 
             if not run_query_u:
                 st.info("設定好上面的篩選條件後，按「開始查詢」才會顯示結果與圖表。")
@@ -1550,7 +1553,15 @@ def main():
             if end_ym_r is None:
                 return
 
-            run_query_r = st.button("🔍 開始查詢", key="r_run_query", type="primary")
+            run_query_r_clicked = st.button("🔍 開始查詢", key="r_run_query", type="primary")
+            # 2026/08 修bug：st.button() 只有「剛被按下的那一瞬間」是 True，
+            # 使用者只要再動一下結果區塊裡的其他元件（例如下面的有無償篩選），
+            # 頁面重新跑一次，按鈕狀態就變回 False，整個結果就會憑空消失、
+            # 看起來像「網頁跳掉」。改用 session_state 記住「已經查詢過」，
+            # 不會因為結果區塊裡的其他互動就被重置。
+            if run_query_r_clicked:
+                st.session_state["r_query_done"] = True
+            run_query_r = st.session_state.get("r_query_done", False)
 
             if not run_query_r:
                 st.info("設定好上面的篩選條件後，按「開始查詢」才會顯示結果。")
@@ -1768,7 +1779,10 @@ def main():
             # （可能好幾十萬筆）拿去畫表格、算統計、畫圖表，資料一多直接把
             # Streamlit Cloud 的記憶體吃爆導致當機。改成要按下面這個按鈕才會
             # 真的去算，畫面一打開不會做任何重工作。
-            run_query = st.button("🔍 開始查詢", key="c_run_query", type="primary")
+            run_query_clicked = st.button("🔍 開始查詢", key="c_run_query", type="primary")
+            if run_query_clicked:
+                st.session_state["c_query_done"] = True
+            run_query = st.session_state.get("c_query_done", False)
 
             if not run_query:
                 st.info("設定好上面的篩選條件後，按「開始查詢」才會顯示結果與統計圖表"
@@ -1935,7 +1949,11 @@ def main():
                 elif not t_model_specific and not t_part_specific and not t_faultpart_specific:
                     st.caption("📍 機型、零件料號、零件類別都選「所有」：只會顯示總計，不拆欄")
 
-                run_query_t = st.button("🔍 查詢", key="t_run_query", type="primary")
+                run_query_t_clicked = st.button("🔍 查詢", key="t_run_query", type="primary")
+
+            if run_query_t_clicked:
+                st.session_state["t_query_done"] = True
+            run_query_t = st.session_state.get("t_query_done", False)
 
             if run_query_t:
                 trend_result, trend_flags, trend_break_values, trend_break_col = part_monthly_trend(
