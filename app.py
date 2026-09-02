@@ -935,6 +935,21 @@ def _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
     return scope
 
 
+def rate_monthly_case_count(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch):
+    """2026/08 新增：歷年累積故障率頁面的「每月故障案件量」匯出。沿用這個
+    分頁目前選的篩選條件（類別/機型/故障部位/零件料號/維修分公司），但不是
+    累積數字，是每一個月「單月」的故障數量，方便匯出看逐月變化。"""
+    scope = _filter_scope(usage_df, f_cat, f_io, f_model, f_part, f_partno, f_branch)
+    qty_col = ASSUMED_USAGE_COLUMNS["qty"]
+    monthly = (
+        scope.groupby("年月", as_index=False)[qty_col].sum()
+        .rename(columns={"年月": "月份", qty_col: "故障案件量"})
+        .sort_values("月份")
+        .reset_index(drop=True)
+    )
+    return monthly
+
+
 def rate_table(usage_df, shipment_df, year_cols, end_ym,
                 f_cat, f_io, f_model, f_part, f_partno, f_branch):
     """2026/08 大改：
@@ -1573,6 +1588,39 @@ def main():
                     "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
                     "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
                 )
+
+                # 2026/08 新增：每月故障案件量匯出（沿用同一組篩選條件，不是累積數字）
+                st.markdown('<div class="section-title">每月故障案件量</div>', unsafe_allow_html=True)
+                st.caption("沿用上面選的篩選條件，但不是累積數字，是每個月「單月」的故障數量")
+                monthly_case = rate_monthly_case_count(usage_df, f_cat_r, f_io_r, f_model_r, f_part_r,
+                                                        f_partno_r, f_branch_r)
+                if len(monthly_case) > 0:
+                    st.dataframe(monthly_case, use_container_width=True)
+                    st.download_button(
+                        "下載每月故障案件量 CSV",
+                        monthly_case.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="每月故障案件量.csv",
+                        mime="text/csv",
+                        key="monthly_case_download",
+                    )
+                    try:
+                        import altair as alt
+                        monthly_chart = (
+                            alt.Chart(monthly_case)
+                            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#1c3a5e")
+                            .encode(
+                                x=alt.X("月份:N", sort=None, title=None,
+                                        axis=alt.Axis(labelAngle=-45, labelFontSize=10)),
+                                y=alt.Y("故障案件量:Q"),
+                                tooltip=["月份", "故障案件量"],
+                            )
+                            .properties(height=300)
+                        )
+                        st.altair_chart(monthly_chart, use_container_width=True)
+                    except ImportError:
+                        st.bar_chart(monthly_case, x="月份", y="故障案件量")
+                else:
+                    st.info("目前篩選條件下查無資料。")
 
 
         # ---------------- 報修案件查詢 ----------------
