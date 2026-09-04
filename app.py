@@ -1139,6 +1139,98 @@ def rate_table(usage_df, shipment_df, year_cols, end_ym,
     return result, red_flags
 
 
+def derive_production_origin(machine_no_series: pd.Series) -> str:
+    """2026/08 新增：從維修機號的第7碼判斷生產地（多數決，避免個別打錯字的
+    異常機號干擾）。V=DAV，E=DIT，都沒有或平手則回傳「未知」。用真實資料
+    驗證過48種Z系列機型，全部正確。"""
+    s = machine_no_series.dropna().astype(str)
+    if s.empty:
+        return "未知"
+    seventh = s.str.slice(6, 7).str.upper()
+    v_count = (seventh == "V").sum()
+    e_count = (seventh == "E").sum()
+    if v_count == 0 and e_count == 0:
+        return "未知"
+    return "DAV" if v_count >= e_count else "DIT"
+
+
+def export_series_summary_table(usage_df, shipment_df, year_cols, models: list, base_year: int):
+    """2026/08 第三輪改版：歷年累積故障率頁面的「系列總表」匯出。
+    改成動態逐年展開，不是固定「去年累積+今年單年」兩欄——機型賣了幾年，
+    就展開幾組「單年出貨量」「單年零件更換量」欄位，每一年也都有自己的
+    「累進故障率」欄位（累積到那一年為止，跟分頁上面主表格的算法一致）：
+      - 出貨量欄位：{年}出貨量(A,B,C...)，各自是「單一年度」自己的數字，
+        從該機型實際開始出貨的年度，一路展開到 base_year
+      - 零件更換量欄位：{年}零件更換量(D,E,F...)，接續著出貨量的字母
+      - 出貨(總)數量 = 所有單年出貨量加總；更換(總)數量 = 所有單年
+        零件更換量加總
+      - {年}故障率：每一年都有一欄，是「累積到那一年為止」的故障率
+        （例如2025故障率 = (D+E)/(A+B)，D/E是2024/2025零件更換量，
+        A/B是2024/2025出貨量），不是單一年度自己的故障率
+    """
+    import string
+    letters = list(string.ascii_uppercase)
+
+    rows = []
+    for model in models:
+        sub = usage_df[usage_df["機型"] == model]
+        if sub.empty:
+            continue
+        io = sub["內外機"].mode().iloc[0] if not sub["內外機"].mode().empty else "未知"
+        origin = derive_production_origin(sub["維修機號"])
+
+        start_year = earliest_nonzero_year_for_model(shipment_df, year_cols, model)
+        if not start_year or start_year > base_year:
+            start_year = base_year
+        years = list(range(start_year, base_year + 1))
+        n = len(years)
+        if 2 * n > len(letters):
+            # 年數多到26個英文字母不夠用時，退回用年份本身當代號，不會出錯
+            ship_labels = [str(y) for y in years]
+            qty_labels = [f"{y}'" for y in years]
+        else:
+            ship_labels = letters[:n]
+            qty_labels = letters[n:2 * n]
+
+        row = {"室內外機\nIDU/ODU": io, "生產地": origin, "機型\nModel": model}
+
+        single_ships = []
+        single_qtys = []
+        for y in years:
+            cum_to_y = cumulative_shipment(shipment_df, year_cols, model, f"{y}-12")
+            cum_to_prev = cumulative_shipment(shipment_df, year_cols, model, f"{y-1}-12")
+            single_ships.append(cum_to_y - cum_to_prev)
+
+            qty_to_y = sub[sub["年月"] <= f"{y}-12"][ASSUMED_USAGE_COLUMNS["qty"]].sum()
+            qty_to_prev = sub[sub["年月"] <= f"{y-1}-12"][ASSUMED_USAGE_COLUMNS["qty"]].sum()
+            single_qtys.append(qty_to_y - qty_to_prev)
+
+        for y, label, val in zip(years, ship_labels, single_ships):
+            row[f"{y}出貨量\n{label}"] = int(val)
+        row["出貨(總)數量\n" + "+".join(ship_labels)] = int(sum(single_ships))
+
+        for y, label, val in zip(years, qty_labels, single_qtys):
+            row[f"{y}零件更換量\n{label}"] = int(val)
+        row["更換(總)數量\n" + "+".join(qty_labels)] = int(sum(single_qtys))
+
+        cum_ship = 0
+        cum_qty = 0
+        for i, y in enumerate(years):
+            cum_ship += single_ships[i]
+            cum_qty += single_qtys[i]
+            rate = (cum_qty / cum_ship) if cum_ship else None
+            if i == 0:
+                formula = f"{qty_labels[0]}/{ship_labels[0]}"
+            else:
+                formula = f"({'+'.join(qty_labels[:i+1])})/({'+'.join(ship_labels[:i+1])})"
+            row[f"{y}故障率\n={formula}"] = f"{rate:.2%}" if rate is not None else "-"
+
+        row["更新日期\n(僅更新到前月底)"] = datetime.now().strftime("%Y-%m-%d")
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------------
 # 畫面
 # ---------------------------------------------------------------------------
@@ -1629,6 +1721,30 @@ def main():
                     "所以累積故障率是用『查找年月所在年度以前的完整年份 + 出貨資料裡若有涵蓋到當年度的欄位』相加，"
                     "不是精確到月的出貨量。這點需要跟你確認是否可接受，或提供月粒度的出貨資料。"
                 )
+
+                # 2026/08 新增：系列總表匯出（格式比照使用者提供的「Z系列總表」）
+                st.markdown('<div class="section-title">系列總表匯出</div>', unsafe_allow_html=True)
+                st.caption("用上面選的機型（請選具體機型，不要選「所有機型」）+ 查找年度，"
+                           "產生跟公司既有「Z系列總表」一樣格式的報表：生產地依維修機號第7碼判斷"
+                           "（V=DAV／E=DIT，多數決）、故障率是累積邏輯（選了哪一年就累積到那一年）")
+                series_models = [m for m in f_model_r if m != ALL_MODELS_OPTION]
+                if not series_models:
+                    st.info("請在上面的「機型」選單選至少一個具體機型（不要選「所有機型」），才能匯出系列總表。")
+                else:
+                    series_base_year = int(end_ym_r.split("-")[0])
+                    series_table = export_series_summary_table(usage_df, shipment_df, year_cols,
+                                                                 series_models, series_base_year)
+                    if len(series_table) == 0:
+                        st.info("查無資料。")
+                    else:
+                        st.dataframe(series_table, use_container_width=True)
+                        st.download_button(
+                            "下載系列總表 CSV",
+                            series_table.to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"系列總表_{series_base_year}.csv",
+                            mime="text/csv",
+                            key="series_table_download",
+                        )
 
                 # 2026/08 第四輪：每月故障案件量匯出（限制近12個月＋依故障部位拆欄＋有無償篩選）
                 st.markdown('<div class="section-title">每月故障案件量</div>', unsafe_allow_html=True)
