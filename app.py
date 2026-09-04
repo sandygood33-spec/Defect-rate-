@@ -1270,10 +1270,18 @@ def filterable_multiselect(label, options, key, container=None, all_option=None)
     東西（例如打「ZVLT」卻連 RZQ125KCVLT9 都跑出來）。這是 Streamlit 本身
     的已知限制，沒有參數可以關掉。這裡加一個文字篩選框，先用真正的
     「包含」字串比對把選項清單縮小，縮小後才交給 multiselect，繞開
-    模糊比對的問題。"""
+    模糊比對的問題。
+    2026/08 修bug：文字框包在 st.form 裡——如果不這樣做，Streamlit的
+    text_input 每打一個字就會讓整頁重新跑一次，若這時候查詢結果已經
+    按過「開始查詢」還留在畫面上，等於每打一個字就把整個查詢結果重算
+    一次，資料一大就會卡到像當機。包進 form 之後，要按 Enter 或「套用」
+    才會真的觸發重新整理，不會每個字都重算。"""
     target = container if container is not None else st
     with target:
-        filter_text = st.text_input(f"篩選{label}（可留空，輸入部分文字精確縮小範圍）", key=f"{key}_filter")
+        with st.form(key=f"{key}_filter_form", border=False):
+            filter_text = st.text_input(f"篩選{label}（可留空，輸入部分文字精確縮小範圍，按Enter套用）",
+                                         key=f"{key}_filter")
+            st.form_submit_button("套用篩選", use_container_width=True)
         if filter_text.strip():
             others = [o for o in options if all_option is None or o != all_option]
             filtered = [o for o in others if filter_text.strip().upper() in str(o).upper()]
