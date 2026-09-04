@@ -1264,6 +1264,25 @@ def safe_multiselect(label, options, key, disabled=False, container=None, **kwar
                                placeholder="全部（不選＝全部）", **kwargs)
 
 
+def filterable_multiselect(label, options, key, container=None, all_option=None):
+    """2026/08 新增：Streamlit 內建 multiselect 的搜尋是「模糊比對」（字元
+    只要照順序出現、不用連續就算符合），選項一多常常跑出一堆不相關的
+    東西（例如打「ZVLT」卻連 RZQ125KCVLT9 都跑出來）。這是 Streamlit 本身
+    的已知限制，沒有參數可以關掉。這裡加一個文字篩選框，先用真正的
+    「包含」字串比對把選項清單縮小，縮小後才交給 multiselect，繞開
+    模糊比對的問題。"""
+    target = container if container is not None else st
+    with target:
+        filter_text = st.text_input(f"篩選{label}（可留空，輸入部分文字精確縮小範圍）", key=f"{key}_filter")
+        if filter_text.strip():
+            others = [o for o in options if all_option is None or o != all_option]
+            filtered = [o for o in others if filter_text.strip().upper() in str(o).upper()]
+            shown_options = ([all_option] if all_option else []) + filtered
+        else:
+            shown_options = options
+        return safe_multiselect(label, shown_options, key=key, container=target)
+
+
 CUSTOM_CSS = """
 <style>
 :root {
@@ -1588,7 +1607,8 @@ def main():
                 if f_cat_r and ALL_CATEGORY_OPTION not in f_cat_r: model_scope_r = model_scope_r[model_scope_r["類別"].isin(f_cat_r)]
                 if f_io_r != "全部": model_scope_r = model_scope_r[model_scope_r["內外機"] == f_io_r]
                 avail_models_r = [ALL_MODELS_OPTION] + sorted(model_scope_r["機型"].unique().tolist())
-                f_model_r = safe_multiselect("機型", avail_models_r, key="r_model", container=r1[2])
+                f_model_r = filterable_multiselect("機型", avail_models_r, key="r_model",
+                                                    container=r1[2], all_option=ALL_MODELS_OPTION)
 
                 f_part_r = r1[3].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="r_part",
                                               placeholder="全部（不選＝全部）")
