@@ -1155,21 +1155,38 @@ def derive_production_origin(machine_no_series: pd.Series) -> str:
 
 
 def export_series_summary_table(usage_df, shipment_df, year_cols, models: list, base_year: int):
-    """2026/08 第三輪改版：歷年累積故障率頁面的「系列總表」匯出。
-    改成動態逐年展開，不是固定「去年累積+今年單年」兩欄——機型賣了幾年，
-    就展開幾組「單年出貨量」「單年零件更換量」欄位，每一年也都有自己的
-    「累進故障率」欄位（累積到那一年為止，跟分頁上面主表格的算法一致）：
-      - 出貨量欄位：{年}出貨量(A,B,C...)，各自是「單一年度」自己的數字，
-        從該機型實際開始出貨的年度，一路展開到 base_year
-      - 零件更換量欄位：{年}零件更換量(D,E,F...)，接續著出貨量的字母
-      - 出貨(總)數量 = 所有單年出貨量加總；更換(總)數量 = 所有單年
-        零件更換量加總
-      - {年}故障率：每一年都有一欄，是「累積到那一年為止」的故障率
-        （例如2025故障率 = (D+E)/(A+B)，D/E是2024/2025零件更換量，
-        A/B是2024/2025出貨量），不是單一年度自己的故障率
+    """2026/08 第四輪改版：歷年累積故障率頁面的「系列總表」匯出。
+    年度欄位改成「整批機型共用同一組」，不是每個機型自己展開自己的年度
+    範圍——用選定機型裡「最早開始出貨的那個機型」的年度當起點，一路到
+    base_year，所有機型都套用同一組欄位；還沒開始賣的年度，數字就是0
+    （不是留空、不是拿掉那個機型的資料），這樣每個機型的欄位數才會一致、
+    才能直接並排比較：
+      - {年}出貨量(A,B,C...)：固定年度，每個機型都有同一組年度欄位
+      - {年}零件更換量：接續著出貨量的字母
+      - 出貨(總)數量 / 更換(總)數量：該機型從自己實際起賣年度到base_year
+        的加總（起賣前的0本來就不影響加總）
+      - {年}故障率：每一年一欄，「累積到那一年為止」的故障率，還沒出貨
+        的年度分母是0，顯示「-」
     """
     import string
     letters = list(string.ascii_uppercase)
+
+    # 先算出「整批機型」共用的年度範圍：用選定機型裡最早開始出貨的年度當起點
+    model_start_years = []
+    for model in models:
+        sy = earliest_nonzero_year_for_model(shipment_df, year_cols, model)
+        if sy and sy <= base_year:
+            model_start_years.append(sy)
+    overall_start = min(model_start_years) if model_start_years else base_year
+    years = list(range(overall_start, base_year + 1))
+    n = len(years)
+    if 2 * n > len(letters):
+        # 年數多到26個英文字母不夠用時，退回用年份本身當代號，不會出錯
+        ship_labels = [str(y) for y in years]
+        qty_labels = [f"{y}'" for y in years]
+    else:
+        ship_labels = letters[:n]
+        qty_labels = letters[n:2 * n]
 
     rows = []
     for model in models:
@@ -1178,19 +1195,6 @@ def export_series_summary_table(usage_df, shipment_df, year_cols, models: list, 
             continue
         io = sub["內外機"].mode().iloc[0] if not sub["內外機"].mode().empty else "未知"
         origin = derive_production_origin(sub["維修機號"])
-
-        start_year = earliest_nonzero_year_for_model(shipment_df, year_cols, model)
-        if not start_year or start_year > base_year:
-            start_year = base_year
-        years = list(range(start_year, base_year + 1))
-        n = len(years)
-        if 2 * n > len(letters):
-            # 年數多到26個英文字母不夠用時，退回用年份本身當代號，不會出錯
-            ship_labels = [str(y) for y in years]
-            qty_labels = [f"{y}'" for y in years]
-        else:
-            ship_labels = letters[:n]
-            qty_labels = letters[n:2 * n]
 
         row = {"室內外機\nIDU/ODU": io, "生產地": origin, "機型\nModel": model}
 
