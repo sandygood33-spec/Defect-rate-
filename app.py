@@ -1707,6 +1707,15 @@ def main():
                     more_note = f"\n（僅顯示前20個機型，共選了{len(f_model_r)}個）" if len(f_model_r) > 20 else ""
                     st.info("📦 已選多個機型，各機型累積出貨量：\n" + "\n".join(lines) + more_note)
 
+                # 🔍 暫時除錯用：印出按下查詢當下，程式實際收到的篩選條件是什麼
+                with st.expander("🔍 除錯資訊（暫時加的，抓到問題後會拿掉）", expanded=True):
+                    st.write("f_cat_r =", f_cat_r)
+                    st.write("f_io_r =", f_io_r)
+                    st.write("f_model_r =", f_model_r)
+                    st.write("f_part_r =", f_part_r)
+                    st.write("f_partno_r =", f_partno_r)
+                    st.write("f_branch_r =", f_branch_r)
+
                 result_r, red_flags = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
                                                   f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
                 st.markdown('<div class="section-title">查詢結果</div>', unsafe_allow_html=True)
