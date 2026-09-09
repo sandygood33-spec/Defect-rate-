@@ -1256,13 +1256,21 @@ def safe_selectbox(label, options, key, disabled=False, container=None, **kwargs
     return target.selectbox(label, options, key=key, disabled=disabled, **kwargs)
 
 
-def safe_multiselect(label, options, key, disabled=False, container=None, **kwargs):
+def safe_multiselect(label, options, key, disabled=False, container=None, all_option=None, **kwargs):
     """multiselect 版的防呆：上游條件變了之後，把選項清單裡已經不存在的
     殘留選擇值濾掉，不會整個炸掉或卡住矛盾組合。空清單＝不篩選（全部）。
     container：要畫在哪個 st.columns() 的格子裡；不給的話會撐滿整行寬度，
-    這是之前排版跑掉、機型/零件料號變超長的原因，記得都要傳這個參數。"""
+    這是之前排版跑掉、機型/零件料號變超長的原因，記得都要傳這個參數。
+    2026/08 修bug：如果「所有XXX」不小心跟其他具體項目「同時」被選中
+    （例如在下拉選單裡用了瀏覽器的全選手勢，把「所有機型」連同一堆具體
+    機型一起選進去），程式原本會直接判定成「收合成所有」，讓使用者明明
+    選了具體機型、結果卻查出「所有機型」的資料，完全看不出來哪裡錯。
+    改成：只要清單裡除了「所有XXX」還有其他具體項目，就自動把「所有XXX」
+    這個選項拿掉，只保留具體項目，才不會被誤判。"""
     if key in st.session_state:
         st.session_state[key] = [v for v in st.session_state[key] if v in options]
+        if all_option and len(st.session_state[key]) > 1 and all_option in st.session_state[key]:
+            st.session_state[key] = [v for v in st.session_state[key] if v != all_option]
     target = container if container is not None else st
     return target.multiselect(label, options, key=key, disabled=disabled,
                                placeholder="全部（不選＝全部）", **kwargs)
@@ -1292,7 +1300,7 @@ def filterable_multiselect(label, options, key, container=None, all_option=None)
             shown_options = ([all_option] if all_option else []) + filtered
         else:
             shown_options = options
-        return safe_multiselect(label, shown_options, key=key, container=target)
+        return safe_multiselect(label, shown_options, key=key, container=target, all_option=all_option)
 
 
 CUSTOM_CSS = """
@@ -1476,7 +1484,7 @@ def main():
                 )
                 start_ym = f"{start_date_in.year:04d}-{start_date_in.month:02d}"
                 end_ym = f"{end_date_in.year:04d}-{end_date_in.month:02d}"
-                f_cat = r1[2].multiselect("類別", all_cats, key="u_cat", placeholder="全部（不選＝全部）")
+                f_cat = safe_multiselect("類別", all_cats, key="u_cat", container=r1[2], all_option=ALL_CATEGORY_OPTION)
                 f_io = r1[3].selectbox("室內/外機", ["全部"] + all_ios, key="u_io")
 
                 model_scope = model_map_display
@@ -1485,22 +1493,26 @@ def main():
                 avail_models = [ALL_MODELS_OPTION] + sorted(model_scope["機型"].unique().tolist())
 
                 r2 = st.columns(4)
-                f_model = safe_multiselect("機型", avail_models, key="u_model", container=r2[0])
-                f_part = r2[1].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="u_part",
-                                            placeholder="全部（不選＝全部）")
+                f_model = safe_multiselect("機型", avail_models, key="u_model", container=r2[0],
+                                            all_option=ALL_MODELS_OPTION)
+                f_part = safe_multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="u_part",
+                                           container=r2[1], all_option=ALL_FAULTPARTS_OPTION)
                 # 2026/08：拿掉「需先選故障部位才能選零件料號」的限制，沒選故障部位時列全部已知料號
                 avail_partno = sorted({c for p in f_part for c in CATEGORY_TO_CODES.get(p, [])}) if f_part \
                     else sorted(CODE_TO_CATEGORY.keys())
                 avail_partno = [ALL_PARTNO_OPTION] + avail_partno
-                f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno", container=r2[2])
-                f_branch = r2[3].multiselect("維修分公司別", all_branches, key="u_branch", placeholder="全部（不選＝全部）")
+                f_partno = safe_multiselect("零件料號", avail_partno, key="u_partno", container=r2[2],
+                                             all_option=ALL_PARTNO_OPTION)
+                f_branch = safe_multiselect("維修分公司別", all_branches, key="u_branch", container=r2[3],
+                                             all_option=ALL_BRANCHES_OPTION)
                 if ALL_BRANCHES_OPTION in f_branch:
                     st.caption("📍 已選「所有據點」，結果會直接加總不分公司顯示，其他分公司選擇會被忽略")
 
                 r3 = st.columns(4)
-                f_payment = r3[0].multiselect("有無償", [ALL_PAYMENT_OPTION] + all_payments, key="u_payment",
-                                               placeholder="全部（不選＝全部）")
-                f_county = r3[1].multiselect("縣市別", all_counties, key="u_county", placeholder="全部（不選＝全部）")
+                f_payment = safe_multiselect("有無償", [ALL_PAYMENT_OPTION] + all_payments, key="u_payment",
+                                              container=r3[0], all_option=ALL_PAYMENT_OPTION)
+                f_county = safe_multiselect("縣市別", all_counties, key="u_county", container=r3[1],
+                                             all_option=ALL_COUNTIES_OPTION)
                 if ALL_COUNTIES_OPTION in f_county:
                     st.caption("📍 已選「所有縣市」，結果會直接加總不分縣市顯示，其他縣市選擇會被忽略")
                 f_faultcode = safe_multiselect("故障碼", [ALL_FAULTCODE_OPTION] + all_fault_codes,
@@ -1612,7 +1624,8 @@ def main():
             with st.container(border=True):
                 # 一行固定4個框，跟零件耗用一覽同款排版
                 r1 = st.columns(4)
-                f_cat_r = r1[0].multiselect("類別", all_cats, key="r_cat", placeholder="全部（不選＝全部）")
+                f_cat_r = safe_multiselect("類別", all_cats, key="r_cat", container=r1[0],
+                                            all_option=ALL_CATEGORY_OPTION)
                 f_io_r = r1[1].selectbox("室內/外機", ["全部"] + all_ios, key="r_io")
 
                 model_scope_r = model_map_display
@@ -1622,8 +1635,8 @@ def main():
                 f_model_r = filterable_multiselect("機型", avail_models_r, key="r_model",
                                                     container=r1[2], all_option=ALL_MODELS_OPTION)
 
-                f_part_r = r1[3].multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="r_part",
-                                              placeholder="全部（不選＝全部）")
+                f_part_r = safe_multiselect("故障部位", [ALL_FAULTPARTS_OPTION] + all_parts, key="r_part",
+                                             container=r1[3], all_option=ALL_FAULTPARTS_OPTION)
 
                 # 動態起點：只選了單一機型（且不是「所有機型」）時，用該機型第一次
                 # 出貨不為0的年度；沒選/選多個/選「所有機型」時，用檔案裡最早的
@@ -1650,14 +1663,16 @@ def main():
                 else:
                     st.warning("出貨資料裡找不到任何年度欄位，無法選擇查找年月。")
                     end_ym_r = None
-                f_branch_r = r2[1].multiselect("維修分公司別", all_branches, key="r_branch", placeholder="全部（不選＝全部）")
+                f_branch_r = safe_multiselect("維修分公司別", all_branches, key="r_branch", container=r2[1],
+                                               all_option=ALL_BRANCHES_OPTION)
                 if ALL_BRANCHES_OPTION in f_branch_r:
                     st.caption("📍 已選「所有據點」，結果會直接加總不分公司顯示，其他分公司選擇會被忽略")
                 # 2026/08：零件料號不再鎖定，隨時可選（沒選故障部位時列全部已知料號）
                 avail_partno_r = sorted({c for p in f_part_r for c in CATEGORY_TO_CODES.get(p, [])}) if f_part_r \
                     else sorted(CODE_TO_CATEGORY.keys())
                 avail_partno_r = [ALL_PARTNO_OPTION] + avail_partno_r
-                f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno", container=r2[2])
+                f_partno_r = safe_multiselect("零件料號", avail_partno_r, key="r_partno", container=r2[2],
+                                               all_option=ALL_PARTNO_OPTION)
 
                 selected_all_labels_r = [
                     lbl for cond, lbl in [
@@ -1706,15 +1721,6 @@ def main():
                         lines.append(f"　・{m}（{m_start_label}～{end_ym_r}）出貨數量：{int(m_ship)} 台")
                     more_note = f"\n（僅顯示前20個機型，共選了{len(f_model_r)}個）" if len(f_model_r) > 20 else ""
                     st.info("📦 已選多個機型，各機型累積出貨量：\n" + "\n".join(lines) + more_note)
-
-                # 🔍 暫時除錯用：印出按下查詢當下，程式實際收到的篩選條件是什麼
-                with st.expander("🔍 除錯資訊（暫時加的，抓到問題後會拿掉）", expanded=True):
-                    st.write("f_cat_r =", f_cat_r)
-                    st.write("f_io_r =", f_io_r)
-                    st.write("f_model_r =", f_model_r)
-                    st.write("f_part_r =", f_part_r)
-                    st.write("f_partno_r =", f_partno_r)
-                    st.write("f_branch_r =", f_branch_r)
 
                 result_r, red_flags = rate_table(usage_df, shipment_df, year_cols, end_ym_r,
                                                   f_cat_r, f_io_r, f_model_r, f_part_r, f_partno_r, f_branch_r)
@@ -1858,25 +1864,27 @@ def main():
             st.markdown('<div class="section-title">查詢條件</div>', unsafe_allow_html=True)
             with st.container(border=True):
                 r1 = st.columns(4)
-                f_cat_c = r1[0].multiselect("類別", case_all_cats, key="c_cat", placeholder="全部（不選＝全部）")
+                f_cat_c = safe_multiselect("類別", case_all_cats, key="c_cat", container=r1[0],
+                                            all_option=ALL_CATEGORY_OPTION)
                 f_io_c = r1[1].selectbox("室內/外機", ["全部"] + case_all_ios, key="c_io")
                 case_model_scope = case_df
                 if f_cat_c and ALL_CATEGORY_OPTION not in f_cat_c: case_model_scope = case_model_scope[case_model_scope["類別"].isin(f_cat_c)]
                 if f_io_c != "全部": case_model_scope = case_model_scope[case_model_scope["內外機"] == f_io_c]
                 avail_case_models = [ALL_MODELS_OPTION] + sorted(case_model_scope["機型"].dropna().unique().tolist())
-                f_model_c = safe_multiselect("機型", avail_case_models, key="c_model", container=r1[2])
-                f_county_c = r1[3].multiselect("縣市別", case_all_counties, key="c_county",
-                                                placeholder="全部（不選＝全部）")
+                f_model_c = safe_multiselect("機型", avail_case_models, key="c_model", container=r1[2],
+                                              all_option=ALL_MODELS_OPTION)
+                f_county_c = safe_multiselect("縣市別", case_all_counties, key="c_county", container=r1[3],
+                                               all_option=ALL_COUNTIES_OPTION)
 
                 r2 = st.columns(4)
-                f_year_c = r2[0].multiselect("報修年", case_all_years, key="c_year",
-                                              placeholder="全部（不選＝全部）")
-                f_branch_c = r2[1].multiselect("維修分公司別", case_all_branches, key="c_branch",
-                                                placeholder="全部（不選＝全部）")
+                f_year_c = safe_multiselect("報修年", case_all_years, key="c_year", container=r2[0],
+                                             all_option=ALL_YEAR_OPTION)
+                f_branch_c = safe_multiselect("維修分公司別", case_all_branches, key="c_branch", container=r2[1],
+                                               all_option=ALL_BRANCHES_OPTION)
                 # 2026/08 新增：出貨經銷商改成兩層——先選經銷商類別，再選店名
-                f_dealer_type_c = r2[2].multiselect(
+                f_dealer_type_c = safe_multiselect(
                     "經銷商類別", [ALL_DEALER_TYPE_OPTION, DEALER_TYPE_MASS, DEALER_TYPE_NORMAL],
-                    key="c_dealer_type", placeholder="全部（不選＝全部）",
+                    key="c_dealer_type", container=r2[2], all_option=ALL_DEALER_TYPE_OPTION,
                 )
                 dealer_type_scope = case_df
                 if f_dealer_type_c and ALL_DEALER_TYPE_OPTION not in f_dealer_type_c:
@@ -1884,17 +1892,18 @@ def main():
                 avail_dealers_c = [ALL_DEALER_OPTION] + sorted(
                     dealer_type_scope["出貨經銷商"].dropna().astype(str).unique().tolist()
                 )
-                f_dealer_c = safe_multiselect("出貨經銷商", avail_dealers_c, key="c_dealer", container=r2[3])
+                f_dealer_c = safe_multiselect("出貨經銷商", avail_dealers_c, key="c_dealer", container=r2[3],
+                                               all_option=ALL_DEALER_OPTION)
 
                 r3 = st.columns(4)
-                f_reason_c = r3[0].multiselect("報修原因", [ALL_REASON_OPTION] + case_all_reasons,
-                                                key="c_reason", placeholder="全部（不選＝全部）")
-                f_status_c = r3[1].multiselect("故障狀況", [ALL_STATUS_OPTION] + case_all_statuses,
-                                                key="c_status", placeholder="全部（不選＝全部）")
-                f_faultname_c = r3[2].multiselect("故障部位名稱", [ALL_FAULTNAME_OPTION] + case_all_faultnames,
-                                                   key="c_faultname", placeholder="全部（不選＝全部）")
-                f_resp_c = r3[3].multiselect("責任歸屬", [ALL_RESP_OPTION] + case_all_resps,
-                                              key="c_resp", placeholder="全部（不選＝全部）")
+                f_reason_c = safe_multiselect("報修原因", [ALL_REASON_OPTION] + case_all_reasons,
+                                               key="c_reason", container=r3[0], all_option=ALL_REASON_OPTION)
+                f_status_c = safe_multiselect("故障狀況", [ALL_STATUS_OPTION] + case_all_statuses,
+                                               key="c_status", container=r3[1], all_option=ALL_STATUS_OPTION)
+                f_faultname_c = safe_multiselect("故障部位名稱", [ALL_FAULTNAME_OPTION] + case_all_faultnames,
+                                                  key="c_faultname", container=r3[2], all_option=ALL_FAULTNAME_OPTION)
+                f_resp_c = safe_multiselect("責任歸屬", [ALL_RESP_OPTION] + case_all_resps,
+                                             key="c_resp", container=r3[3], all_option=ALL_RESP_OPTION)
 
             scope_c = case_df
             all_cat_c = ALL_CATEGORY_OPTION in f_cat_c
@@ -2065,7 +2074,8 @@ def main():
             with st.container(border=True):
                 r1 = st.columns(4)
                 avail_models_t = [ALL_MODELS_OPTION] + sorted(usage_df["機型"].dropna().unique().tolist())
-                t_model = safe_multiselect("機型", avail_models_t, key="t_model", container=r1[0])
+                t_model = safe_multiselect("機型", avail_models_t, key="t_model", container=r1[0],
+                                            all_option=ALL_MODELS_OPTION)
                 t_model_specific = bool(t_model) and ALL_MODELS_OPTION not in t_model
                 if t_model_specific:
                     avail_partno_t = sorted(
@@ -2074,10 +2084,10 @@ def main():
                 else:
                     avail_partno_t = sorted(usage_df["零件料號"].dropna().unique().tolist())
                 t_partno = safe_multiselect("零件料號", [ALL_PARTNO_OPTION] + avail_partno_t,
-                                             key="t_partno", container=r1[1])
+                                             key="t_partno", container=r1[1], all_option=ALL_PARTNO_OPTION)
                 # 2026/08 新增：零件類別（故障部位）篩選，跟機型/零件料號一樣多選＋所有XXX
                 t_faultpart = safe_multiselect("零件類別", [ALL_FAULTPARTS_OPTION] + all_parts,
-                                                key="t_faultpart", container=r1[2])
+                                                key="t_faultpart", container=r1[2], all_option=ALL_FAULTPARTS_OPTION)
 
                 # 2026/08 修：基準月份只要選「年/月」，不用選到「日」
                 available_yms_t = sorted(usage_df["年月"].dropna().unique().tolist())
