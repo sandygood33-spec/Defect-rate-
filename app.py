@@ -734,6 +734,51 @@ def usage_table(usage_df, start_ym, end_ym, f_cat, f_io, f_model, f_part, f_faul
     return result, scope
 
 
+def usage_year_matrix(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
+                       f_partno, f_branch, f_payment, f_county):
+    """2026/08 新增：零件耗用一覽的「機型×年度矩陣」匯出。沿用查詢條件裡
+    的所有篩選（類別/機型/故障部位/故障碼/零件料號/維修分公司/有無償/
+    縣市別，包含機型本身有沒有篩選），但不受查找年月起訖限制——直接抓
+    資料裡全部年度，列是機型、欄是年度（+最後一欄ALL總計），數字是當年
+    耗用量加總。今年這種還沒過完的年度，欄名會標「(-該年最後完整月份)」。
+    """
+    scope = usage_df
+    if ALL_CATEGORY_OPTION not in f_cat: scope = _apply_filter(scope, "類別", f_cat)
+    if f_io != "全部": scope = scope[scope["內外機"] == f_io]
+    if ALL_MODELS_OPTION not in f_model: scope = _apply_filter(scope, "機型", f_model)
+    if ALL_FAULTPARTS_OPTION not in f_part: scope = _apply_filter(scope, "故障部位", f_part)
+    if ALL_FAULTCODE_OPTION not in f_faultcode: scope = _apply_filter(scope, "故障碼", f_faultcode)
+    if ALL_PARTNO_OPTION not in f_partno: scope = _apply_filter(scope, "零件料號", f_partno)
+    if ALL_BRANCHES_OPTION not in f_branch: scope = _apply_filter(scope, "維修分公司", f_branch)
+    if ALL_PAYMENT_OPTION not in f_payment: scope = _apply_filter(scope, "有無償", f_payment)
+    if ALL_COUNTIES_OPTION not in f_county: scope = _apply_filter(scope, "縣市別", f_county)
+
+    if scope.empty:
+        return pd.DataFrame()
+
+    scope = scope.copy()
+    scope["年"] = scope["年月"].str.slice(0, 4).astype(int)
+    qty_col = ASSUMED_USAGE_COLUMNS["qty"]
+
+    pivot = scope.groupby(["機型", "年"])[qty_col].sum().unstack(fill_value=0)
+    pivot = pivot.astype(int)
+
+    today = datetime.now()
+    col_labels = {}
+    for y in pivot.columns:
+        if y == today.year:
+            months = scope.loc[scope["年"] == y, "年月"].str.slice(5, 7)
+            max_month = months.astype(int).max() if len(months) else None
+            col_labels[y] = f"{y}(-{max_month:02d})" if max_month else f"{y}(資料不完整)"
+        else:
+            col_labels[y] = str(y)
+    pivot = pivot.rename(columns=col_labels)
+
+    pivot["ALL"] = pivot.sum(axis=1)
+    pivot = pivot.reset_index().rename(columns={"機型": "機型"}).sort_values("機型").reset_index(drop=True)
+    return pivot
+
+
 def _is_single_or_collapsed(selected: list, all_opt: str = None) -> bool:
     """給「歷年耗用比較」用：這個篩選欄位是不是「所有XXX」或最多只選了一個
     具體項目（沒有同時選好幾個不同的東西，避免好幾個組合的量混在同一條
@@ -1614,6 +1659,24 @@ def main():
                         st.altair_chart(year_chart, use_container_width=True)
                     except ImportError:
                         st.bar_chart(yearly, x="年度標籤", y="當期耗用量")
+
+                # 2026/08 新增：機型×年度矩陣匯出（列=機型、欄=年度+ALL總計）
+                st.markdown('<div class="section-title">機型×年度矩陣匯出</div>', unsafe_allow_html=True)
+                st.caption("沿用上面選的篩選條件（機型本身選了什麼也算），不受查找年月起訖限制，"
+                           "直接列出資料裡每一個機型在每一個年度的耗用量")
+                matrix = usage_year_matrix(usage_df, f_cat, f_io, f_model, f_part, f_faultcode,
+                                            f_partno, f_branch, f_payment, f_county)
+                if matrix.empty:
+                    st.info("目前篩選條件下，資料裡沒有符合的紀錄可以匯出。")
+                else:
+                    st.dataframe(matrix, use_container_width=True)
+                    st.download_button(
+                        "下載機型×年度矩陣 CSV",
+                        matrix.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="機型年度矩陣.csv",
+                        mime="text/csv",
+                        key="usage_matrix_download",
+                    )
 
         # ---------------- 歷年累積故障率 ----------------
     with tab_rate:
